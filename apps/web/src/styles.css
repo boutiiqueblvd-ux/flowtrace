@@ -22,7 +22,8 @@ html, body, #root {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -40,7 +41,15 @@ button.primary {
   border-color: #2563eb;
 }
 
-input {
+button.danger-button {
+  background: rgba(127, 29, 29, 0.8);
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #fee2e2;
+  padding: 0.5rem 0.8rem;
+}
+
+input,
+textarea {
   width: 100%;
   margin-top: 0.35rem;
   background: rgba(15, 23, 42, 0.65);
@@ -48,6 +57,11 @@ input {
   border-radius: 8px;
   padding: 0.7rem 0.8rem;
   color: #f8fafc;
+}
+
+textarea {
+  min-height: 110px;
+  resize: vertical;
 }
 
 label {
@@ -118,12 +132,14 @@ label {
 }
 
 .tool-item {
+  width: 100%;
   background: rgba(30, 41, 59, 0.9);
   border: 1px solid rgba(148, 163, 184, 0.25);
   border-radius: 10px;
   padding: 0.75rem 0.8rem;
   margin-bottom: 0.75rem;
   color: #dbeafe;
+  text-align: left;
 }
 
 .canvas-panel {
@@ -141,8 +157,9 @@ label {
 }
 
 .canvas-surface {
+  position: relative;
   flex: 1;
-  min-height: 500px;
+  min-height: 540px;
   padding: 0.5rem 1rem 1rem;
 }
 
@@ -151,13 +168,153 @@ label {
   border-bottom: 1px solid rgba(148, 163, 184, 0.15);
 }
 
+.panel-section--tight {
+  padding-top: 0.25rem;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
 .empty-state {
   margin: 0;
   color: #94a3b8;
+}
+
+.empty-state-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100%;
+  border: 1px dashed rgba(148, 163, 184, 0.4);
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.6);
+  color: #dbeafe;
+  text-align: center;
+  padding: 2rem;
+}
+
+.empty-state-card h3 {
+  margin: 0 0 0.5rem;
+}
+
+.empty-state-card p {
+  margin: 0;
+  max-width: 30rem;
+  color: #cbd5e1;
+}
+
+.validation-banner {
+  position: absolute;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  max-width: 320px;
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  font-size: 0.85rem;
+  border: 1px solid transparent;
+  background: rgba(15, 23, 42, 0.88);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.3);
+}
+
+.validation-banner.error {
+  border-color: rgba(248, 113, 113, 0.9);
+  color: #fecaca;
+}
+
+.validation-banner.info {
+  border-color: rgba(96, 165, 250, 0.8);
+  color: #dbeafe;
 }
 
 .react-flow {
   background: rgba(15, 23, 42, 0.7);
   border-radius: 12px;
   border: 1px solid rgba(148, 163, 184, 0.12);
+  height: 100%;
+}
+
+.workflow-node {
+  width: 180px;
+  min-width: 180px;
+  max-width: 220px;
+  border: 1px solid #475569;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.96);
+  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.25);
+  overflow: hidden;
+}
+
+.workflow-node.selected {
+  box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.8);
+}
+
+.workflow-node__header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 0.35rem 0.5rem 0;
+}
+
+.workflow-node__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.workflow-node__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.6rem 0.8rem 0.8rem;
+  max-width: 100%;
+}
+
+.workflow-node__body strong {
+  color: #f8fafc;
+  overflow-wrap: anywhere;
+}
+
+.workflow-node__body small {
+  display: block;
+  color: #cbd5e1;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.node-handle {
+  width: 12px !important;
+  height: 12px !important;
+  border-radius: 999px !important;
+  background: #e2e8f0 !important;
+  border: 2px solid #0f172a !important;
+}
+
+.node-handle-in {
+  left: -6px !important;
+}
+
+.node-handle-out {
+  right: -6px !important;
+}
+
+.statusbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.8rem 1.25rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.15);
+  background: rgba(15, 23, 42, 0.9);
+  color: #cbd5e1;
 }
