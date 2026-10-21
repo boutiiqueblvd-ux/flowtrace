@@ -93,46 +93,52 @@ export type Workflow = z.infer<typeof workflowSchema>;
 export type WorkflowValidationIssue = z.infer<typeof workflowValidationIssueSchema>;
 export type WorkflowValidationResult = z.infer<typeof workflowValidationResultSchema>;
 
+const executionEventMetadataSchema = z.object({
+  id: z.number().int().nonnegative().optional(),
+  sequence: z.number().int().nonnegative().optional(),
+  runId: z.string().min(1).optional(),
+});
+
 export const executionEventSchema = z.discriminatedUnion('type', [
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('run-created'),
     timestamp: z.string().datetime(),
     message: z.string().min(1),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('run-started'),
     timestamp: z.string().datetime(),
     runId: z.string().min(1),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('node-started'),
     timestamp: z.string().datetime(),
     nodeId: z.string().min(1),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('node-succeeded'),
     timestamp: z.string().datetime(),
     nodeId: z.string().min(1),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('node-failed'),
     timestamp: z.string().datetime(),
     nodeId: z.string().min(1),
     reason: z.string().max(500).optional(),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('node-skipped'),
     timestamp: z.string().datetime(),
     nodeId: z.string().min(1),
     reason: z.string().max(500).optional(),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('run-terminal'),
     timestamp: z.string().datetime(),
     status: z.enum(['succeeded', 'failed', 'cancelled']),
     runId: z.string().min(1).optional(),
   }),
-  z.object({
+  executionEventMetadataSchema.extend({
     type: z.literal('run-cancelled'),
     timestamp: z.string().datetime(),
     reason: z.string().max(250).optional(),
