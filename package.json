@@ -1,0 +1,15 @@
+{
+  "name": "flowtrace",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:api": "npm --workspace apps/api run dev",
+    "build": "npm --workspace apps/web run build && npm --workspace apps/api run build",
+    "typecheck": "npm --workspace apps/web run typecheck && npm --workspace apps/api run typecheck",
+    "test": "npm --workspace apps/web run test && npm --workspace apps/api run test"
+  }
+}
