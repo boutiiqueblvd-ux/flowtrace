@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import ReactFlow, { Background, Controls, MiniMap, type Connection, type Node, type Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { NodeInspectorPanel } from './components/NodeInspectorPanel';
@@ -58,8 +58,23 @@ export default function App() {
   const deleteNode = useGraphStore.getState().deleteNode;
   const deleteEdge = useGraphStore.getState().deleteEdge;
   const clearValidationMessage = useGraphStore.getState().clearValidationMessage;
+  const setExecutionStatus = useExecutionStore.getState().setStatus;
+  const runRef = useRef<number | null>(null);
+  const runCancelledRef = useRef(false);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
+
+  useEffect(() => {
+    if (!validationMessage) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      clearValidationMessage();
+    }, 3500);
+
+    return () => window.clearTimeout(timer);
+  }, [clearValidationMessage, validationMessage]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -81,6 +96,78 @@ export default function App() {
     onConnect(connection);
   };
 
+  const handleRunWorkflow = () => {
+    if (executionStatus === 'queued' || executionStatus === 'running') {
+      return;
+    }
+
+    if (nodes.length === 0) {
+      setExecutionStatus('idle');
+      return;
+    }
+
+    runCancelledRef.current = false;
+    const nodeOrder = [...nodes].map((node) => node.id);
+    const totalSteps = Math.max(nodeOrder.length, 1);
+
+    setExecutionStatus('queued');
+    setSelectedNode(nodeOrder[0] ?? null);
+
+    let stepIndex = 0;
+
+    const tick = () => {
+      if (runCancelledRef.current) {
+        setExecutionStatus('cancelled');
+        return;
+      }
+
+      const nextNodeId = nodeOrder[stepIndex];
+      if (!nextNodeId) {
+        setExecutionStatus('succeeded');
+        return;
+      }
+
+      setSelectedNode(nextNodeId);
+      setExecutionStatus('running');
+      const failChance = 0.1;
+      const shouldFail = Math.random() < failChance;
+
+      const delayMs = 700 + ((stepIndex + 1) * 280);
+      runRef.current = window.setTimeout(() => {
+        if (runCancelledRef.current) {
+          setExecutionStatus('cancelled');
+          return;
+        }
+
+        if (shouldFail) {
+          setExecutionStatus('failed');
+          clearValidationMessage();
+          return;
+        }
+
+        stepIndex += 1;
+
+        if (stepIndex >= totalSteps) {
+          setExecutionStatus('succeeded');
+          return;
+        }
+
+        tick();
+      }, delayMs);
+    };
+
+    tick();
+  };
+
+  const handleCancelWorkflow = () => {
+    runCancelledRef.current = true;
+    if (runRef.current) {
+      window.clearTimeout(runRef.current);
+      runRef.current = null;
+    }
+    setExecutionStatus('cancelled');
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -90,9 +177,15 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <button type="button" onClick={clearValidationMessage}>Clear feedback</button>
-          <button type="button" className="primary">
-            Run workflow
-          </button>
+          {executionStatus === 'queued' || executionStatus === 'running' ? (
+            <button type="button" className="warning-button" onClick={handleCancelWorkflow}>
+              Cancel run
+            </button>
+          ) : (
+            <button type="button" className="primary" onClick={handleRunWorkflow}>
+              Run workflow
+            </button>
+          )}
         </div>
       </header>
 

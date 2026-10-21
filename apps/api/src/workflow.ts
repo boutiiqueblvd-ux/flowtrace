@@ -100,19 +100,37 @@ export const executionEventSchema = z.discriminatedUnion('type', [
     message: z.string().min(1),
   }),
   z.object({
+    type: z.literal('run-started'),
+    timestamp: z.string().datetime(),
+    runId: z.string().min(1),
+  }),
+  z.object({
     type: z.literal('node-started'),
     timestamp: z.string().datetime(),
     nodeId: z.string().min(1),
   }),
   z.object({
-    type: z.literal('node-completed'),
+    type: z.literal('node-succeeded'),
     timestamp: z.string().datetime(),
     nodeId: z.string().min(1),
   }),
   z.object({
-    type: z.literal('run-completed'),
+    type: z.literal('node-failed'),
     timestamp: z.string().datetime(),
-    status: z.enum(['succeeded', 'failed']),
+    nodeId: z.string().min(1),
+    reason: z.string().max(500).optional(),
+  }),
+  z.object({
+    type: z.literal('node-skipped'),
+    timestamp: z.string().datetime(),
+    nodeId: z.string().min(1),
+    reason: z.string().max(500).optional(),
+  }),
+  z.object({
+    type: z.literal('run-terminal'),
+    timestamp: z.string().datetime(),
+    status: z.enum(['succeeded', 'failed', 'cancelled']),
+    runId: z.string().min(1).optional(),
   }),
   z.object({
     type: z.literal('run-cancelled'),

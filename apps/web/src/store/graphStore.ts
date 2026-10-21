@@ -88,11 +88,36 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   selectedEdgeId: null,
   validationMessage: null,
   addNode: (kind) => {
-    const id = createNodeId(kind, get().nodes);
+    const existing = get().nodes;
+    const spacingX = 220;
+    const spacingY = 180;
+    let nextPosition = { x: 120, y: 120 };
+
+    for (let offset = 0; offset < 240; offset += 1) {
+      const row = Math.floor(offset / 5);
+      const column = offset % 5;
+      const candidate = {
+        x: 120 + column * spacingX + (row % 2 === 1 ? 40 : 0),
+        y: 120 + row * spacingY,
+      };
+
+      const hasOverlap = existing.some((node) => {
+        const dx = Math.abs(node.position.x - candidate.x);
+        const dy = Math.abs(node.position.y - candidate.y);
+        return dx < 170 && dy < 150;
+      });
+
+      if (!hasOverlap) {
+        nextPosition = candidate;
+        break;
+      }
+    }
+
+    const id = createNodeId(kind, existing);
     const nextNode: GraphNode = {
       id,
       type: 'workflowNode',
-      position: { x: 80 + get().nodes.length * 70, y: 80 + (get().nodes.length % 5) * 80 },
+      position: nextPosition,
       data: {
         kind,
         label: `${kind.charAt(0).toUpperCase()}${kind.slice(1)}`,

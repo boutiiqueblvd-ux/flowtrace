@@ -31,14 +31,27 @@ button {
   border: 1px solid rgba(148, 163, 184, 0.35);
   background: rgba(15, 23, 42, 0.7);
   color: #e2e8f0;
-  border-radius: 8px;
+  border-radius: 10px;
   padding: 0.7rem 1rem;
   cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.15);
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(148, 163, 184, 0.6);
 }
 
 button.primary {
   background: #2563eb;
   border-color: #2563eb;
+}
+
+button.warning-button {
+  background: rgba(234, 88, 12, 0.15);
+  border-color: rgba(251, 146, 60, 0.6);
+  color: #fed7aa;
 }
 
 button.danger-button {
@@ -110,6 +123,7 @@ label {
   grid-template-columns: 220px minmax(0, 1fr) 320px;
   flex: 1;
   min-height: 0;
+  gap: 0;
 }
 
 .toolbar-panel,
@@ -160,7 +174,7 @@ label {
   position: relative;
   flex: 1;
   min-height: 540px;
-  padding: 0.5rem 1rem 1rem;
+  padding: 0.75rem 1rem 1rem;
 }
 
 .panel-section {
@@ -210,15 +224,36 @@ label {
 
 .validation-banner {
   position: absolute;
-  right: 1.5rem;
-  bottom: 1.5rem;
-  max-width: 320px;
+  right: 1.25rem;
+  top: 1rem;
+  max-width: 340px;
   border-radius: 10px;
-  padding: 0.7rem 0.9rem;
+  padding: 0.8rem 1rem;
   font-size: 0.85rem;
   border: 1px solid transparent;
-  background: rgba(15, 23, 42, 0.88);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.3);
+  background: rgba(15, 23, 42, 0.92);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.35);
+  z-index: 20;
+  animation: bannerFade 3.5s ease forwards;
+}
+
+@keyframes bannerFade {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  15% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  80% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
 }
 
 .validation-banner.error {
@@ -238,10 +273,20 @@ label {
   height: 100%;
 }
 
+.react-flow__controls {
+  margin: 1rem !important;
+  box-shadow: 0 15px 35px rgba(15, 23, 42, 0.3) !important;
+}
+
+.react-flow__minimap {
+  margin: 1rem !important;
+  box-shadow: 0 15px 35px rgba(15, 23, 42, 0.32) !important;
+}
+
 .workflow-node {
-  width: 180px;
-  min-width: 180px;
-  max-width: 220px;
+  width: 160px;
+  min-width: 160px;
+  max-width: 180px;
   border: 1px solid #475569;
   border-radius: 12px;
   background: rgba(15, 23, 42, 0.96);
