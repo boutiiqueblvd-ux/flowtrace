@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactFlow, { Background, Controls, MiniMap, type Connection, type Node, type Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
+import { ExecutionTimeline } from './components/ExecutionTimeline';
 import { NodeInspectorPanel } from './components/NodeInspectorPanel';
 import { Toolbar } from './components/Toolbar';
 import { WorkflowNode } from './components/WorkflowNode';
 import { useExecutionStore } from './store/executionStore';
 import { useGraphStore } from './store/graphStore';
-import type { WorkflowNodeType } from './types';
+import type { ExecutionEvent, WorkflowNodeType } from './types';
 
 const nodeTypes = {
   workflowNode: WorkflowNode,
@@ -27,22 +28,22 @@ function useGraphSnapshot() {
 }
 
 function useExecutionSnapshot() {
-  const [status, setStatus] = useState(() => useExecutionStore.getState().status);
+  const [snapshot, setSnapshot] = useState(() => useExecutionStore.getState());
 
   useEffect(() => {
     const unsubscribe = useExecutionStore.subscribe((state) => {
-      setStatus(state.status);
+      setSnapshot(state);
     });
 
     return unsubscribe;
   }, []);
 
-  return status;
+  return snapshot;
 }
 
 export default function App() {
   const graph = useGraphSnapshot();
-  const executionStatus = useExecutionSnapshot();
+  const execution = useExecutionSnapshot();
   const nodes = graph.nodes;
   const edges = graph.edges;
   const selectedNodeId = graph.selectedNodeId;
@@ -59,10 +60,23 @@ export default function App() {
   const deleteEdge = useGraphStore.getState().deleteEdge;
   const clearValidationMessage = useGraphStore.getState().clearValidationMessage;
   const setExecutionStatus = useExecutionStore.getState().setStatus;
+  const applyRunSnapshot = useExecutionStore.getState().applyRunSnapshot;
+  const appendEvent = useExecutionStore.getState().appendEvent;
+  const setSelectedExecutionNode = useExecutionStore.getState().setSelectedNodeId;
   const runRef = useRef<number | null>(null);
   const runCancelledRef = useRef(false);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
+  const selectedNodeData = useMemo(() => {
+    return nodes.map((node) => ({
+      ...node,
+      data: {
+        ...node.data,
+        executionStatus: execution.nodeStates[node.id]?.status ?? 'queued',
+      },
+    }));
+  }, [execution.nodeStates, nodes]);
 
   useEffect(() => {
     if (!validationMessage) {
@@ -97,7 +111,7 @@ export default function App() {
   };
 
   const handleRunWorkflow = () => {
-    if (executionStatus === 'queued' || executionStatus === 'running') {
+    if (execution.status === 'queued' || execution.status === 'running') {
       return;
     }
 
@@ -107,56 +121,47 @@ export default function App() {
     }
 
     runCancelledRef.current = false;
-    const nodeOrder = [...nodes].map((node) => node.id);
-    const totalSteps = Math.max(nodeOrder.length, 1);
+    const runId = `run-${Date.now()}`;
+    const now = new Date().toISOString();
+    const events: ExecutionEvent[] = [
+      { id: 1, sequence: 1, type: 'run-created', timestamp: now, message: 'Workflow queued for execution.', runId },
+      { id: 2, sequence: 2, type: 'run-started', timestamp: new Date(Date.now() + 50).toISOString(), runId },
+    ];
 
-    setExecutionStatus('queued');
-    setSelectedNode(nodeOrder[0] ?? null);
+    nodes.forEach((node, index) => {
+      events.push({
+        id: 3 + index * 2,
+        sequence: 3 + index * 2,
+        type: 'node-started',
+        timestamp: new Date(Date.now() + 100 + index * 250).toISOString(),
+        nodeId: node.id,
+        runId,
+      });
 
-    let stepIndex = 0;
+      events.push({
+        id: 4 + index * 2,
+        sequence: 4 + index * 2,
+        type: 'node-succeeded',
+        timestamp: new Date(Date.now() + 450 + index * 250).toISOString(),
+        nodeId: node.id,
+        runId,
+        output: { value: `processed-${node.id}` },
+      });
+    });
 
-    const tick = () => {
-      if (runCancelledRef.current) {
-        setExecutionStatus('cancelled');
-        return;
-      }
+    events.push({
+      id: events.length + 1,
+      sequence: events.length + 1,
+      type: 'run-terminal',
+      timestamp: new Date(Date.now() + 800).toISOString(),
+      status: 'succeeded',
+      runId,
+    });
 
-      const nextNodeId = nodeOrder[stepIndex];
-      if (!nextNodeId) {
-        setExecutionStatus('succeeded');
-        return;
-      }
-
-      setSelectedNode(nextNodeId);
-      setExecutionStatus('running');
-      const failChance = 0.1;
-      const shouldFail = Math.random() < failChance;
-
-      const delayMs = 700 + ((stepIndex + 1) * 280);
-      runRef.current = window.setTimeout(() => {
-        if (runCancelledRef.current) {
-          setExecutionStatus('cancelled');
-          return;
-        }
-
-        if (shouldFail) {
-          setExecutionStatus('failed');
-          clearValidationMessage();
-          return;
-        }
-
-        stepIndex += 1;
-
-        if (stepIndex >= totalSteps) {
-          setExecutionStatus('succeeded');
-          return;
-        }
-
-        tick();
-      }, delayMs);
-    };
-
-    tick();
+    applyRunSnapshot({ id: runId, workflowId: 'workflow-1', status: 'succeeded', events });
+    setExecutionStatus('succeeded');
+    setSelectedNode(nodes[0]?.id ?? null);
+    setSelectedExecutionNode(nodes[0]?.id ?? null);
   };
 
   const handleCancelWorkflow = () => {
@@ -165,6 +170,18 @@ export default function App() {
       window.clearTimeout(runRef.current);
       runRef.current = null;
     }
+
+    if (execution.selectedRunId) {
+      appendEvent({
+        id: (execution.events.at(-1)?.id ?? execution.lastSequence) + 1,
+        sequence: execution.lastSequence + 1,
+        type: 'run-cancelled',
+        timestamp: new Date().toISOString(),
+        reason: 'Cancelled by operator.',
+        runId: execution.selectedRunId,
+      });
+    }
+
     setExecutionStatus('cancelled');
   };
 
@@ -177,7 +194,7 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <button type="button" onClick={clearValidationMessage}>Clear feedback</button>
-          {executionStatus === 'queued' || executionStatus === 'running' ? (
+          {execution.status === 'queued' || execution.status === 'running' ? (
             <button type="button" className="warning-button" onClick={handleCancelWorkflow}>
               Cancel run
             </button>
@@ -206,7 +223,7 @@ export default function App() {
               </div>
             ) : (
               <ReactFlow
-                nodes={nodes as Node[]}
+                nodes={selectedNodeData as Node[]}
                 edges={edges as Edge[]}
                 nodeTypes={nodeTypes}
                 fitView
@@ -216,6 +233,7 @@ export default function App() {
                 onNodeClick={(_, node) => {
                   setSelectedNode(node.id);
                   setSelectedEdge(null);
+                  setSelectedExecutionNode(node.id);
                 }}
                 onEdgeClick={(_, edge) => {
                   setSelectedNode(null);
@@ -240,11 +258,28 @@ export default function App() {
               </div>
             )}
           </div>
+
+          <div className="execution-inspector">
+            <div className="execution-inspector__header">
+              <h3>Execution timeline</h3>
+              <span>{execution.events.length} events</span>
+            </div>
+            <ExecutionTimeline
+              events={execution.events}
+              selectedEventId={selectedEventId}
+              onSelectEvent={setSelectedEventId}
+              onSelectNode={(nodeId) => {
+                setSelectedNode(nodeId);
+                setSelectedExecutionNode(nodeId);
+              }}
+            />
+          </div>
         </section>
 
         <NodeInspectorPanel
           selectedNode={selectedNode}
           selectedEdge={selectedEdge}
+          executionInfo={selectedNodeId ? execution.nodeStates[selectedNodeId] ?? null : null}
           onChange={updateNode}
           onDeleteNode={deleteNode}
           onDeleteEdge={deleteEdge}
@@ -253,7 +288,7 @@ export default function App() {
 
       <footer className="statusbar">
         <span>Execution status</span>
-        <strong>{executionStatus}</strong>
+        <strong>{execution.status}</strong>
       </footer>
     </div>
   );

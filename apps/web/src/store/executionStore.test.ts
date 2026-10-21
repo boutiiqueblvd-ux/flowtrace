@@ -1,0 +1,50 @@
+import { describe, expect, it } from 'vitest';
+import { useExecutionStore } from './executionStore';
+
+describe('execution store', () => {
+  it('updates node state from ordered execution events', () => {
+    const { clear, applyRunSnapshot } = useExecutionStore.getState();
+
+    clear();
+    applyRunSnapshot({
+      id: 'run-123',
+      workflowId: 'wf-1',
+      status: 'queued',
+      events: [
+        { id: 1, sequence: 1, type: 'run-created', timestamp: '2024-01-01T00:00:00.000Z', message: 'queued' },
+        { id: 2, sequence: 2, type: 'node-started', timestamp: '2024-01-01T00:00:01.000Z', nodeId: 'alpha', runId: 'run-123' },
+        { id: 3, sequence: 3, type: 'node-succeeded', timestamp: '2024-01-01T00:00:03.000Z', nodeId: 'alpha', runId: 'run-123' },
+        { id: 4, sequence: 4, type: 'run-terminal', timestamp: '2024-01-01T00:00:03.500Z', status: 'succeeded', runId: 'run-123' },
+      ],
+    });
+
+    const state = useExecutionStore.getState();
+    expect(state.status).toBe('succeeded');
+    expect(state.nodeStates.alpha).toMatchObject({
+      status: 'succeeded',
+      durationMs: expect.any(Number),
+    });
+  });
+
+  it('ignores stale events that are older than the latest seen sequence', () => {
+    const { clear, applyRunSnapshot, appendEvent } = useExecutionStore.getState();
+
+    clear();
+    applyRunSnapshot({
+      id: 'run-99',
+      workflowId: 'wf-2',
+      status: 'running',
+      events: [
+        { id: 1, sequence: 1, type: 'run-created', timestamp: '2024-01-01T00:00:00.000Z', message: 'queued' },
+        { id: 2, sequence: 2, type: 'node-started', timestamp: '2024-01-01T00:00:01.000Z', nodeId: 'beta', runId: 'run-99' },
+      ],
+    });
+
+    appendEvent({ id: 1, sequence: 1, type: 'run-created', timestamp: '2024-01-01T00:00:00.000Z', message: 'stale replay' });
+
+    expect(useExecutionStore.getState().lastSequence).toBe(2);
+    expect(useExecutionStore.getState().nodeStates.beta).toMatchObject({
+      status: 'running',
+    });
+  });
+});
