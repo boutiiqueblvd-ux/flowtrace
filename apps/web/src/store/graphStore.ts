@@ -89,29 +89,23 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   validationMessage: null,
   addNode: (kind) => {
     const existing = get().nodes;
-    const spacingX = 220;
-    const spacingY = 180;
-    let nextPosition = { x: 120, y: 120 };
-
-    for (let offset = 0; offset < 240; offset += 1) {
-      const row = Math.floor(offset / 5);
-      const column = offset % 5;
-      const candidate = {
-        x: 120 + column * spacingX + (row % 2 === 1 ? 40 : 0),
-        y: 120 + row * spacingY,
-      };
-
-      const hasOverlap = existing.some((node) => {
-        const dx = Math.abs(node.position.x - candidate.x);
-        const dy = Math.abs(node.position.y - candidate.y);
-        return dx < 170 && dy < 150;
-      });
-
-      if (!hasOverlap) {
-        nextPosition = candidate;
-        break;
+    const columnByKind: Record<WorkflowNodeType, number> = {
+      input: 120,
+      transform: 420,
+      output: 720,
+    };
+    const sameKindNodes = existing.filter((node) => node.data.kind === kind);
+    const bottomNode = sameKindNodes.reduce<GraphNode | null>((current, node) => {
+      if (!current) {
+        return node;
       }
-    }
+      return node.position.y > current.position.y ? node : current;
+    }, null);
+
+    const nextPosition = {
+      x: columnByKind[kind] ?? 120,
+      y: bottomNode ? bottomNode.position.y + 200 : 120,
+    };
 
     const id = createNodeId(kind, existing);
     const nextNode: GraphNode = {

@@ -275,12 +275,40 @@ label {
 
 .react-flow__controls {
   margin: 1rem !important;
+  padding: 0.3rem !important;
+  gap: 0.35rem !important;
+  display: flex !important;
+  flex-direction: column !important;
   box-shadow: 0 15px 35px rgba(15, 23, 42, 0.3) !important;
+  background: rgba(15, 23, 42, 0.76) !important;
+  border: 1px solid rgba(148, 163, 184, 0.18) !important;
+}
+
+.react-flow__controls button {
+  margin: 0 !important;
+  background: rgba(15, 23, 42, 0.72) !important;
+  border: 1px solid rgba(148, 163, 184, 0.18) !important;
 }
 
 .react-flow__minimap {
   margin: 1rem !important;
+  background: rgba(15, 23, 42, 0.52) !important;
+  border: 1px solid rgba(96, 165, 250, 0.22) !important;
+  border-radius: 12px !important;
   box-shadow: 0 15px 35px rgba(15, 23, 42, 0.32) !important;
+}
+
+.react-flow__minimap svg {
+  background: rgba(8, 15, 29, 0.18) !important;
+}
+
+.react-flow__minimap-mask {
+  fill: rgba(15, 23, 42, 0.28) !important;
+}
+
+.react-flow__minimap-node {
+  fill: rgba(96, 165, 250, 0.7) !important;
+  stroke: rgba(147, 197, 253, 0.8) !important;
 }
 
 .workflow-node {
@@ -292,6 +320,18 @@ label {
   background: rgba(15, 23, 42, 0.96);
   box-shadow: 0 12px 30px rgba(15, 23, 42, 0.25);
   overflow: hidden;
+  animation: nodeFadeIn 0.5s ease-out;
+}
+
+@keyframes nodeFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .workflow-node.selected {
