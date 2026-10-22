@@ -3,6 +3,7 @@ import ReactFlow, { Background, Controls, MiniMap, type Connection, type Node, t
 import 'reactflow/dist/style.css';
 import { ExecutionTimeline } from './components/ExecutionTimeline';
 import { NodeInspectorPanel } from './components/NodeInspectorPanel';
+import { followRunStream } from './runStream';
 import { Toolbar } from './components/Toolbar';
 import { WorkflowNode } from './components/WorkflowNode';
 import { useExecutionStore } from './store/executionStore';
@@ -12,6 +13,33 @@ import type { ExecutionEvent, GraphNode, WorkflowNodeType } from './types';
 const nodeTypes = {
   workflowNode: WorkflowNode,
 } as const;
+
+const API_BASE_URL = 'http://localhost:3001';
+
+const buildWorkflowPayload = (sourceNodes: GraphNode[], sourceEdges: ReturnType<typeof useGraphStore.getState>['edges']) => ({
+  id: `workflow-${Date.now()}`,
+  name: 'Current workflow',
+  nodes: sourceNodes.map((node) => ({
+    id: node.id,
+    type: node.data.kind,
+    position: {
+      x: Number(node.position.x),
+      y: Number(node.position.y),
+    },
+    config: {
+      label: node.data.label,
+      description: node.data.description,
+      ...(node.data.kind === 'input' ? { defaultValue: '' } : {}),
+      ...(node.data.kind === 'transform' ? { expression: 'value' } : {}),
+      ...(node.data.kind === 'output' ? { sink: 'console' } : {}),
+    },
+  })),
+  edges: sourceEdges.map((edge) => ({
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+  })),
+});
 
 function useGraphSnapshot() {
   const [snapshot, setSnapshot] = useState(() => useGraphStore.getState());
@@ -67,6 +95,7 @@ export default function App() {
   const setSelectedExecutionNode = useExecutionStore.getState().setSelectedNodeId;
   const runRef = useRef<number | null>(null);
   const runCancelledRef = useRef(false);
+  const streamControllerRef = useRef<AbortController | null>(null);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
@@ -277,6 +306,7 @@ export default function App() {
   };
 
   const handleLoadSampleWorkflow = async () => {
+    streamControllerRef.current?.abort();
     useExecutionStore.setState({
       status: 'idle',
       selectedRunId: null,
@@ -305,7 +335,31 @@ export default function App() {
     onConnect(connection);
   };
 
-  const handleRunWorkflow = () => {
+  const loadRunStream = async (runId: string) => {
+    streamControllerRef.current?.abort();
+    const controller = new AbortController();
+    streamControllerRef.current = controller;
+
+    // Read the cursor and status from the store, not the render closure, so a new run
+    // never resumes from the previous run's sequence.
+    const outcome = await followRunStream({
+      apiBaseUrl: API_BASE_URL,
+      runId,
+      signal: controller.signal,
+      getCursor: () => useExecutionStore.getState().lastSequence,
+      isFinished: () => ['succeeded', 'failed', 'cancelled'].includes(useExecutionStore.getState().status),
+      onEvent: appendEvent,
+    });
+
+    if (outcome === 'not-found') {
+      useGraphStore.setState({
+        validationMessage: { type: 'error', text: 'This run no longer exists on the server.' },
+      });
+      setExecutionStatus('failed');
+    }
+  };
+
+  const handleRunWorkflow = async () => {
     if (execution.status === 'queued' || execution.status === 'running') {
       return;
     }
@@ -316,81 +370,79 @@ export default function App() {
     }
 
     runCancelledRef.current = false;
-    const runId = `run-${Date.now()}`;
-    const now = new Date().toISOString();
-    const events: ExecutionEvent[] = [
-      { id: 1, sequence: 1, type: 'run-created', timestamp: now, message: 'Workflow queued for execution.', runId },
-      { id: 2, sequence: 2, type: 'run-started', timestamp: new Date(Date.now() + 50).toISOString(), runId },
-    ];
+    const workflow = buildWorkflowPayload(nodes, edges);
 
-    nodes.forEach((node, index) => {
-      events.push({
-        id: 3 + index * 2,
-        sequence: 3 + index * 2,
-        type: 'node-started',
-        timestamp: new Date(Date.now() + 150 + index * 250).toISOString(),
-        nodeId: node.id,
-        runId,
+    try {
+      const response = await fetch(`${API_BASE_URL}/runs`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workflow }),
       });
 
-      events.push({
-        id: 4 + index * 2,
-        sequence: 4 + index * 2,
-        type: 'node-succeeded',
-        timestamp: new Date(Date.now() + 500 + index * 250).toISOString(),
-        nodeId: node.id,
-        runId,
-        output: { value: `processed-${node.id}` },
-      });
-    });
-
-    const finishedEvent = {
-      id: events.length + 1,
-      sequence: events.length + 1,
-      type: 'run-terminal' as const,
-      timestamp: new Date(Date.now() + 900).toISOString(),
-      status: 'succeeded' as const,
-      runId,
-    };
-
-    applyRunSnapshot({ id: runId, workflowId: 'workflow-1', status: 'running', events });
-    setExecutionStatus('running');
-    setSelectedNode(nodes[0]?.id ?? null);
-    setSelectedExecutionNode(nodes[0]?.id ?? null);
-
-    if (runRef.current) {
-      window.clearTimeout(runRef.current);
-    }
-
-    runRef.current = window.setTimeout(() => {
-      if (runCancelledRef.current) {
-        return;
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({ error: 'Run request failed.' }));
+        throw new Error(errorBody.error || 'Run request failed.');
       }
 
-      applyRunSnapshot({ id: runId, workflowId: 'workflow-1', status: 'succeeded', events: [...events, finishedEvent] });
-      setExecutionStatus('succeeded');
-    }, 1300);
+      const payload = await response.json() as { run: { id: string; workflowId: string; status: string; events: ExecutionEvent[] } };
+      const run = payload.run;
+      applyRunSnapshot({
+        id: run.id,
+        workflowId: run.workflowId,
+        status: run.status,
+        events: run.events,
+      });
+      setExecutionStatus(run.status === 'queued' ? 'queued' : run.status === 'running' ? 'running' : run.status === 'failed' ? 'failed' : run.status === 'cancelled' ? 'cancelled' : 'succeeded');
+      setSelectedNode(nodes[0]?.id ?? null);
+      setSelectedExecutionNode(nodes[0]?.id ?? null);
+
+      if (runRef.current) {
+        window.clearTimeout(runRef.current);
+      }
+
+      void loadRunStream(run.id);
+    } catch (error) {
+      console.error('Run request failed', error);
+      useGraphStore.setState({
+        validationMessage: { type: 'error', text: error instanceof Error ? error.message : 'Unable to start workflow execution.' },
+      });
+      setExecutionStatus('failed');
+    }
   };
 
-  const handleCancelWorkflow = () => {
-    runCancelledRef.current = true;
-    if (runRef.current) {
-      window.clearTimeout(runRef.current);
-      runRef.current = null;
+  const handleCancelWorkflow = async () => {
+    if (!execution.selectedRunId) {
+      return;
     }
 
-    if (execution.selectedRunId) {
-      appendEvent({
-        id: (execution.events.at(-1)?.id ?? execution.lastSequence) + 1,
-        sequence: execution.lastSequence + 1,
-        type: 'run-cancelled',
-        timestamp: new Date().toISOString(),
-        reason: 'Cancelled by operator.',
-        runId: execution.selectedRunId,
+    try {
+      const response = await fetch(`${API_BASE_URL}/runs/${execution.selectedRunId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Cancelled by operator.' }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({ error: 'Cancel request failed.' }));
+        throw new Error(errorBody.error || 'Cancel request failed.');
+      }
+
+      // The stream delivers the cancellation events and then closes; applying the snapshot
+      // just makes the result visible immediately. Status comes from the run's own events.
+      const payload = await response.json() as { run: { id: string; workflowId: string; status: string; events: ExecutionEvent[] } };
+      applyRunSnapshot({
+        id: payload.run.id,
+        workflowId: payload.run.workflowId,
+        status: payload.run.status,
+        events: payload.run.events,
+      });
+      runCancelledRef.current = true;
+    } catch (error) {
+      console.error('Cancel request failed', error);
+      useGraphStore.setState({
+        validationMessage: { type: 'error', text: error instanceof Error ? error.message : 'Unable to cancel workflow execution.' },
       });
     }
-
-    setExecutionStatus('cancelled');
   };
 
   const beginResize = (type: 'left' | 'timeline', event: React.MouseEvent<HTMLDivElement>) => {

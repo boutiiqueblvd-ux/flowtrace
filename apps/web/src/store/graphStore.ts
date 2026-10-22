@@ -1,4 +1,4 @@
-import { applyEdgeChanges, applyNodeChanges, type Connection, type EdgeChange, type NodeChange } from 'reactflow';
+import { applyEdgeChanges, applyNodeChanges, type Connection, type Edge, type EdgeChange, type NodeChange } from 'reactflow';
 import { create } from 'zustand';
 import type { GraphEdge, GraphNode, WorkflowNodeType } from '../types';
 
@@ -187,7 +187,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   },
   setEdges: (changes) => {
     set((state) => ({
-      edges: applyEdgeChanges(changes, state.edges),
+      edges: applyEdgeChanges(changes, state.edges as Edge[]) as GraphEdge[],
     }));
   },
   onConnect: (connection) => {

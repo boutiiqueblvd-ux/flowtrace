@@ -366,15 +366,16 @@ export function createRun(input: unknown): RunCreationResult {
   }
 
   const now = new Date().toISOString();
+  const runId = `run-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
   const run: RunSnapshot = {
-    id: `run-${Date.now()}`,
+    id: runId,
     workflowId: request.workflow.id,
     workflow: request.workflow,
     status: 'queued',
     createdAt: now,
     updatedAt: now,
     metadata: request.metadata ?? {},
-    events: [{ type: 'run-created', timestamp: now, message: `Workflow "${request.workflow.name}" was queued.` }],
+    events: [{ type: 'run-created', id: 1, sequence: 1, timestamp: now, message: `Workflow "${request.workflow.name}" was queued.`, runId }],
     cancelReason: undefined,
   };
 
@@ -385,6 +386,11 @@ export function cancelRun(run: RunSnapshot, input: unknown): CancelRunResult {
   const request = cancelRunRequestSchema.parse(input ?? {});
   const now = new Date().toISOString();
   const reason = request.reason ?? 'Cancelled by operator.';
+
+  // A finished run keeps its real outcome; cancelling it is a no-op.
+  if (run.events.some((event) => event.type === 'run-terminal')) {
+    return { run, cancelled: false };
+  }
 
   const terminalEvent = {
     type: 'run-terminal' as const,

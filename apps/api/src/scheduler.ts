@@ -5,7 +5,7 @@ export type NodeExecutionStatus = 'queued' | 'running' | 'succeeded' | 'failed' 
 export interface SchedulerExecutionContext {
   signal: AbortSignal;
   random: () => number;
-  delay: (ms: number) => Promise<void>;
+  delay: (ms: number, signal?: AbortSignal) => Promise<void>;
   clock: () => string;
 }
 
@@ -22,11 +22,13 @@ export type NodeExecutor = (
 export interface WorkflowSchedulerConfig {
   maxConcurrency?: number;
   executionFn?: NodeExecutor;
-  delay?: (ms: number) => Promise<void>;
+  delay?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
   clock?: () => string;
   runId?: string;
   defaultFailureRate?: number;
+  // Called synchronously for every event, in order, as soon as it happens.
+  onEvent?: (event: ExecutionEvent) => void;
 }
 
 export interface WorkflowScheduler {
@@ -39,10 +41,29 @@ const TERMINAL_RUN_STATES = ['succeeded', 'failed', 'cancelled'] as const;
 
 type RunTerminalState = (typeof TERMINAL_RUN_STATES)[number];
 
+const abortableDelay = (ms: number, signal?: AbortSignal) => {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+};
+
 const buildDefaultExecutionFn = (failureRate: number): NodeExecutor => {
   return async (node, { delay, random, signal }) => {
     const duration = 500 + Math.floor(random() * 2500);
-    await delay(duration);
+    await delay(duration, signal);
 
     if (signal.aborted) {
       return { status: 'failed', reason: `Node "${node.id}" was cancelled.` };
@@ -62,24 +83,25 @@ const shouldSkipNode = (nodeId: string, incoming: Map<string, string[]>, statuse
     return false;
   }
 
-  const terminalDependencies = dependencies.filter((dependency) => TERMINAL_NODE_STATES.includes(statuses.get(dependency) ?? 'queued'));
-  if (terminalDependencies.length !== dependencies.length) {
-    return false;
-  }
-
-  return dependencies.some((dependency) => statuses.get(dependency) !== 'succeeded');
+  // A node can never run once any prerequisite has ended without succeeding,
+  // so it is skipped immediately rather than waiting for its other prerequisites.
+  return dependencies.some((dependency) => {
+    const status = statuses.get(dependency) ?? 'queued';
+    return TERMINAL_NODE_STATES.includes(status) && status !== 'succeeded';
+  });
 };
 
 export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): WorkflowScheduler => {
   const maxConcurrency = config.maxConcurrency ?? 2;
   const randomSource = config.random ?? Math.random;
-  const delayFn = config.delay ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const delayFn = config.delay ?? abortableDelay;
   const clockFn = config.clock ?? (() => new Date().toISOString());
   const executionFn = config.executionFn ?? buildDefaultExecutionFn(config.defaultFailureRate ?? 0.1);
   const runId = config.runId ?? `run-${Date.now()}`;
-  let cancelled = false;
+  let cancelRequested = false;
   let cancelReason = 'Cancelled by operator.';
-  const activeControllers = new Map<string, AbortController>();
+  // Bound by run() so cancel() can settle the active run synchronously.
+  let cancelActiveRun: (() => void) | undefined;
 
   const run = async (workflow: Workflow): Promise<RunSnapshot> => {
     const validation = validateWorkflow(workflow);
@@ -87,31 +109,22 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
       throw new Error(validation.errors.map((issue) => issue.message).join('; '));
     }
 
-    cancelled = false;
-    cancelReason = 'Cancelled by operator.';
     const nodeIds = workflow.nodes.map((node) => node.id);
     const nodeMap = new Map(workflow.nodes.map((node) => [node.id, node]));
     const incoming = new Map<string, string[]>();
-    const outgoing = new Map<string, string[]>();
     const statuses = new Map<string, NodeExecutionStatus>();
 
     for (const nodeId of nodeIds) {
       incoming.set(nodeId, []);
-      outgoing.set(nodeId, []);
       statuses.set(nodeId, 'queued');
     }
 
     for (const edge of workflow.edges) {
-      const nextIncoming = incoming.get(edge.target) ?? [];
-      nextIncoming.push(edge.source);
-      incoming.set(edge.target, nextIncoming);
-
-      const nextOutgoing = outgoing.get(edge.source) ?? [];
-      nextOutgoing.push(edge.target);
-      outgoing.set(edge.source, nextOutgoing);
+      incoming.get(edge.target)?.push(edge.source);
     }
 
-    const events: ExecutionEvent[] = [{ type: 'run-started', timestamp: clockFn(), runId }];
+    const events: ExecutionEvent[] = [];
+    const activeControllers = new Map<string, AbortController>();
     const activePromises = new Map<string, Promise<void>>();
     let terminalState: RunTerminalState | undefined;
     let latestTimestamp = clockFn();
@@ -123,6 +136,7 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
 
       events.push(event);
       latestTimestamp = event.timestamp;
+      config.onEvent?.(event);
     };
 
     const finalizeRun = (state: RunTerminalState) => {
@@ -130,60 +144,55 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
         return;
       }
 
-      const terminalEvent: ExecutionEvent = { type: 'run-terminal', timestamp: clockFn(), status: state, runId };
+      appendEvent({ type: 'run-terminal', timestamp: clockFn(), status: state, runId });
       terminalState = state;
-      events.push(terminalEvent);
-      latestTimestamp = terminalEvent.timestamp;
     };
 
     const markSkipped = (nodeId: string, reason: string) => {
-      if (cancelled || terminalState) {
-        return;
-      }
-
-      if (statuses.get(nodeId) === 'running' || TERMINAL_NODE_STATES.includes(statuses.get(nodeId) ?? 'queued')) {
-        return;
-      }
-
       statuses.set(nodeId, 'skipped');
       appendEvent({ type: 'node-skipped', timestamp: clockFn(), nodeId, reason });
     };
 
-    const markNodeFailed = (nodeId: string, reason: string) => {
-      if (cancelled || terminalState) {
-        return;
-      }
+    // Repeat until stable so skips cascade through transitive dependents regardless of node order.
+    const propagateBlockers = () => {
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const nodeId of nodeIds) {
+          if (statuses.get(nodeId) !== 'queued' || !shouldSkipNode(nodeId, incoming, statuses)) {
+            continue;
+          }
 
-      if (TERMINAL_NODE_STATES.includes(statuses.get(nodeId) ?? 'queued')) {
-        return;
-      }
-
-      statuses.set(nodeId, 'failed');
-      appendEvent({ type: 'node-failed', timestamp: clockFn(), nodeId, reason });
-
-      for (const dependentId of outgoing.get(nodeId) ?? []) {
-        if (statuses.get(dependentId) === 'queued' && shouldSkipNode(dependentId, incoming, statuses)) {
-          markSkipped(dependentId, `Dependent of failed node "${nodeId}" cannot execute.`);
+          const blocker = (incoming.get(nodeId) ?? []).find((dependency) => statuses.get(dependency) !== 'succeeded' && TERMINAL_NODE_STATES.includes(statuses.get(dependency) ?? 'queued'));
+          markSkipped(nodeId, `Dependency "${blocker}" did not succeed.`);
+          changed = true;
         }
       }
     };
 
-    const propagateBlockers = () => {
-      for (const nodeId of nodeIds) {
-        if (statuses.get(nodeId) === 'queued' && shouldSkipNode(nodeId, incoming, statuses)) {
-          markSkipped(nodeId, `Node "${nodeId}" has a failed dependency and cannot run.`);
-        }
+    const settleNode = (nodeId: string, outcome: NodeExecutionOutcome) => {
+      // The node was already settled by cancellation while its executor was still running.
+      if (statuses.get(nodeId) !== 'running') {
+        return;
       }
+
+      if (outcome.status === 'failed') {
+        statuses.set(nodeId, 'failed');
+        appendEvent({ type: 'node-failed', timestamp: clockFn(), nodeId, reason: outcome.reason ?? `Node "${nodeId}" failed.` });
+        return;
+      }
+
+      statuses.set(nodeId, 'succeeded');
+      appendEvent({ type: 'node-succeeded', timestamp: clockFn(), nodeId });
     };
 
     const scheduleReadyNodes = () => {
-      if (cancelled || terminalState) {
+      if (cancelRequested || terminalState) {
         return;
       }
 
       const readyNodes = nodeIds.filter((nodeId) => {
-        const current = statuses.get(nodeId) ?? 'queued';
-        return current === 'queued' && !shouldSkipNode(nodeId, incoming, statuses) && incoming.get(nodeId)?.every((dependency) => statuses.get(dependency) === 'succeeded');
+        return statuses.get(nodeId) === 'queued' && incoming.get(nodeId)?.every((dependency) => statuses.get(dependency) === 'succeeded');
       });
 
       for (const nodeId of readyNodes) {
@@ -210,23 +219,9 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
               delay: delayFn,
               clock: clockFn,
             });
-
-            if (cancelled || controller.signal.aborted) {
-              statuses.set(nodeId, 'cancelled');
-              appendEvent({ type: 'node-skipped', timestamp: clockFn(), nodeId, reason: cancelReason });
-              return;
-            }
-
-            if (outcome.status === 'failed') {
-              markNodeFailed(nodeId, outcome.reason ?? `Node "${nodeId}" failed.`);
-              return;
-            }
-
-            statuses.set(nodeId, 'succeeded');
-            appendEvent({ type: 'node-succeeded', timestamp: clockFn(), nodeId });
+            settleNode(nodeId, outcome);
           } catch (error) {
-            const reason = error instanceof Error ? error.message : 'Unknown execution failure';
-            markNodeFailed(nodeId, reason);
+            settleNode(nodeId, { status: 'failed', reason: error instanceof Error ? error.message : 'Unknown execution failure' });
           } finally {
             activeControllers.delete(nodeId);
             activePromises.delete(nodeId);
@@ -237,70 +232,55 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
       }
     };
 
-    const ensureTerminalState = () => {
-      if (terminalState || cancelled) {
+    cancelActiveRun = () => {
+      if (terminalState) {
         return;
       }
 
-      if (nodeIds.some((nodeId) => statuses.get(nodeId) === 'failed')) {
-        finalizeRun('failed');
-        return;
+      for (const nodeId of nodeIds) {
+        if (statuses.get(nodeId) === 'running') {
+          statuses.set(nodeId, 'cancelled');
+          appendEvent({ type: 'node-skipped', timestamp: clockFn(), nodeId, reason: cancelReason });
+        }
       }
 
-      if (nodeIds.every((nodeId) => statuses.get(nodeId) === 'succeeded')) {
-        finalizeRun('succeeded');
-        return;
+      for (const controller of activeControllers.values()) {
+        controller.abort();
       }
 
-      if (nodeIds.every((nodeId) => TERMINAL_NODE_STATES.includes(statuses.get(nodeId) ?? 'queued'))) {
-        finalizeRun('failed');
-      }
+      finalizeRun('cancelled');
     };
+
+    appendEvent({ type: 'run-started', timestamp: clockFn(), runId });
+
+    if (cancelRequested) {
+      cancelActiveRun();
+    }
 
     scheduleReadyNodes();
 
+    // Keep going until every in-flight node has settled, so a failure in one
+    // branch never stops independent branches from finishing.
     while (activePromises.size > 0) {
-      if (cancelled) {
-        finalizeRun('cancelled');
-        break;
-      }
-
+      await Promise.race(Array.from(activePromises.values()));
       propagateBlockers();
       scheduleReadyNodes();
-
-      if (cancelled) {
-        finalizeRun('cancelled');
-        break;
-      }
-
-      const next = await Promise.race(Array.from(activePromises.values()));
-      void next;
-      propagateBlockers();
-      scheduleReadyNodes();
-      ensureTerminalState();
-
-      if (terminalState) {
-        break;
-      }
     }
 
-    if (!terminalState) {
-      propagateBlockers();
-      scheduleReadyNodes();
+    propagateBlockers();
 
-      if (cancelled) {
-        finalizeRun('cancelled');
-      } else if (nodeIds.every((nodeId) => statuses.get(nodeId) === 'succeeded')) {
-        finalizeRun('succeeded');
-      } else if (nodeIds.some((nodeId) => statuses.get(nodeId) === 'failed')) {
-        finalizeRun('failed');
-      } else {
-        finalizeRun(nodeIds.length === 0 ? 'succeeded' : 'failed');
-      }
+    if (cancelRequested) {
+      finalizeRun('cancelled');
+    } else if (nodeIds.every((nodeId) => statuses.get(nodeId) === 'succeeded')) {
+      finalizeRun('succeeded');
+    } else {
+      finalizeRun('failed');
     }
 
-    const status: RunSnapshot['status'] = terminalState ?? 'queued';
-    const finalRun: RunSnapshot = {
+    cancelActiveRun = undefined;
+
+    const status: RunSnapshot['status'] = terminalState ?? 'failed';
+    return {
       id: runId,
       workflowId: workflow.id,
       workflow,
@@ -308,23 +288,23 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
       createdAt: events[0]?.timestamp ?? clockFn(),
       updatedAt: latestTimestamp,
       startedAt: events.find((event) => event.type === 'run-started')?.timestamp,
-      finishedAt: events.filter((event) => event.type === 'run-terminal').at(-1)?.timestamp,
+      finishedAt: events.find((event) => event.type === 'run-terminal')?.timestamp,
       metadata: {},
       events,
-      cancelReason: cancelled ? cancelReason : undefined,
+      cancelReason: cancelRequested ? cancelReason : undefined,
     };
-
-    return finalRun;
   };
 
   return {
     run,
     cancel: (reason?: string) => {
-      cancelled = true;
-      cancelReason = reason ?? 'Cancelled by operator.';
-      for (const controller of activeControllers.values()) {
-        controller.abort();
+      if (cancelRequested) {
+        return;
       }
+
+      cancelRequested = true;
+      cancelReason = reason ?? 'Cancelled by operator.';
+      cancelActiveRun?.();
     },
   };
 };

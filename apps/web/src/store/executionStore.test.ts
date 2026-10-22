@@ -47,4 +47,48 @@ describe('execution store', () => {
       status: 'running',
     });
   });
+
+  it('resets the cursor when a different run is loaded so its events are not dropped', () => {
+    const { clear, applyRunSnapshot, appendEvent } = useExecutionStore.getState();
+
+    clear();
+    applyRunSnapshot({
+      id: 'run-1',
+      workflowId: 'wf-1',
+      status: 'succeeded',
+      events: [
+        { id: 1, sequence: 1, type: 'run-created', timestamp: '2024-01-01T00:00:00.000Z', message: 'queued' },
+        { id: 2, sequence: 2, type: 'run-started', timestamp: '2024-01-01T00:00:00.000Z', runId: 'run-1' },
+        { id: 3, sequence: 3, type: 'node-started', timestamp: '2024-01-01T00:00:00.000Z', nodeId: 'alpha', runId: 'run-1' },
+        { id: 4, sequence: 4, type: 'run-terminal', timestamp: '2024-01-01T00:00:01.000Z', status: 'succeeded', runId: 'run-1' },
+      ],
+    });
+
+    applyRunSnapshot({
+      id: 'run-2',
+      workflowId: 'wf-1',
+      status: 'queued',
+      events: [{ id: 1, sequence: 1, type: 'run-created', timestamp: '2024-01-01T00:01:00.000Z', message: 'queued', runId: 'run-2' }],
+    });
+    expect(useExecutionStore.getState().lastSequence).toBe(1);
+
+    appendEvent({ id: 2, sequence: 2, type: 'node-started', timestamp: '2024-01-01T00:01:01.000Z', nodeId: 'beta', runId: 'run-2' });
+
+    const state = useExecutionStore.getState();
+    expect(state.events.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(state.nodeStates).toEqual({ beta: expect.objectContaining({ status: 'running' }) });
+  });
+
+  it('computes node duration from live events', () => {
+    const { clear, appendEvent } = useExecutionStore.getState();
+
+    clear();
+    appendEvent({ id: 1, sequence: 1, type: 'node-started', timestamp: '2024-01-01T00:00:01.000Z', nodeId: 'alpha', runId: 'run-5' });
+    appendEvent({ id: 2, sequence: 2, type: 'node-succeeded', timestamp: '2024-01-01T00:00:04.000Z', nodeId: 'alpha', runId: 'run-5' });
+
+    expect(useExecutionStore.getState().nodeStates.alpha).toMatchObject({
+      startedAt: '2024-01-01T00:00:01.000Z',
+      durationMs: 3000,
+    });
+  });
 });

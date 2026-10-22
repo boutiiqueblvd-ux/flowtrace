@@ -49,7 +49,7 @@ const labelForEvent = (event: ExecutionEvent) => {
     return `Node ${event.nodeId} skipped`;
   }
 
-  return event.type;
+  return 'Event';
 };
 
 const eventTypeLabel = (event: ExecutionEvent) => {

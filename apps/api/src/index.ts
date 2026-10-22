@@ -1,6 +1,7 @@
 import { pathToFileURL } from 'node:url';
 import Fastify from 'fastify';
-import { cancelRun, createRun, validateWorkflow, type ExecutionEvent, type RunSnapshot } from './workflow.js';
+import { createWorkflowScheduler, type WorkflowSchedulerConfig } from './scheduler.js';
+import { cancelRunRequestSchema, createRun, validateWorkflow, type ExecutionEvent, type RunSnapshot } from './workflow.js';
 
 const MAX_EVENT_HISTORY = 1000;
 
@@ -8,38 +9,12 @@ const getEventSequence = (event: ExecutionEvent) => {
   return event.sequence ?? event.id ?? 0;
 };
 
-const normalizeRunEvents = (run: RunSnapshot): RunSnapshot => {
-  const deduplicated = new Map<number, ExecutionEvent>();
-
-  const orderedEvents = [...run.events].sort((left, right) => getEventSequence(left) - getEventSequence(right));
-
-  for (const [index, event] of orderedEvents.entries()) {
-    const explicitSequence = typeof event.sequence === 'number' ? event.sequence : typeof event.id === 'number' ? event.id : undefined;
-    const sequence = explicitSequence && explicitSequence > 0 ? explicitSequence : index + 1;
-
-    deduplicated.set(sequence, {
-      ...event,
-      id: sequence,
-      sequence,
-      runId: event.runId ?? run.id,
-    } satisfies ExecutionEvent);
-  }
-
-  const events = Array.from(deduplicated.values())
-    .sort((left, right) => getEventSequence(left) - getEventSequence(right))
-    .slice(-MAX_EVENT_HISTORY);
-
-  return {
-    ...run,
-    events,
-  };
-};
-
+// Events are stored in append order with sequences assigned once, so this is already sorted.
 const getEventsAfterCursor = (run: RunSnapshot, cursor: number): ExecutionEvent[] => {
-  return [...run.events]
-    .sort((left, right) => getEventSequence(left) - getEventSequence(right))
-    .filter((event) => getEventSequence(event) > cursor);
+  return run.events.filter((event) => getEventSequence(event) > cursor);
 };
+
+const isTerminalStatus = (status: RunSnapshot['status']) => status === 'succeeded' || status === 'failed' || status === 'cancelled';
 
 const parseCursor = (value: string | string[] | undefined): number => {
   const rawValue = Array.isArray(value) ? value[0] : value ?? '0';
@@ -51,24 +26,76 @@ const parseCursor = (value: string | string[] | undefined): number => {
   return parsed;
 };
 
-export const createApp = async () => {
+export const createApp = async (options: { schedulerConfig?: WorkflowSchedulerConfig } = {}) => {
   const app = Fastify({
     logger: false,
   });
   const runs = new Map<string, RunSnapshot>();
   const listeners = new Map<string, Set<(run: RunSnapshot) => void>>();
+  const activeSchedulers = new Map<string, ReturnType<typeof createWorkflowScheduler>>();
 
   const setRun = (run: RunSnapshot) => {
-    const normalizedRun = normalizeRunEvents(run);
-    runs.set(normalizedRun.id, normalizedRun);
+    runs.set(run.id, run);
 
-    const listenersForRun = listeners.get(normalizedRun.id) ?? new Set();
+    const listenersForRun = listeners.get(run.id) ?? new Set();
     for (const listener of listenersForRun) {
       try {
-        listener(normalizedRun);
+        listener(run);
       } catch (error) {
         console.error('Failed to notify run listener', error);
       }
+    }
+  };
+
+  // Appends one event to the run's log with the next sequence number. Sequences are
+  // assigned exactly once and never renumbered, so client cursors stay valid.
+  const recordEvent = (runId: string, event: ExecutionEvent) => {
+    const run = runs.get(runId);
+    if (!run) {
+      return;
+    }
+
+    const sequence = (run.events.at(-1)?.sequence ?? 0) + 1;
+    const nextRun: RunSnapshot = {
+      ...run,
+      updatedAt: event.timestamp,
+      events: [...run.events, { ...event, id: sequence, sequence, runId }].slice(-MAX_EVENT_HISTORY),
+    };
+
+    if (event.type === 'run-started') {
+      nextRun.status = 'running';
+      nextRun.startedAt = event.timestamp;
+    }
+
+    if (event.type === 'run-terminal') {
+      nextRun.status = event.status;
+      nextRun.finishedAt = event.timestamp;
+    }
+
+    setRun(nextRun);
+  };
+
+  const startSchedulerForRun = async (run: RunSnapshot) => {
+    const scheduler = createWorkflowScheduler({
+      ...options.schedulerConfig,
+      runId: run.id,
+      onEvent: (event) => {
+        recordEvent(run.id, event);
+        options.schedulerConfig?.onEvent?.(event);
+      },
+    });
+    activeSchedulers.set(run.id, scheduler);
+
+    try {
+      await scheduler.run(run.workflow);
+    } catch (error) {
+      const currentRun = runs.get(run.id);
+      if (currentRun && !isTerminalStatus(currentRun.status)) {
+        recordEvent(run.id, { type: 'run-terminal', timestamp: new Date().toISOString(), status: 'failed', runId: run.id });
+      }
+      console.error('Workflow scheduler failed for run', run.id, error);
+    } finally {
+      activeSchedulers.delete(run.id);
     }
   };
 
@@ -122,7 +149,8 @@ export const createApp = async () => {
 
   app.get('/runs/:id/events', async (request, reply) => {
     const params = request.params as { id: string };
-    const cursor = parseCursor(typeof request.query.after === 'string' ? request.query.after : request.headers['last-event-id'] as string | undefined);
+    const query = request.query as Record<string, string | string[] | undefined>;
+    const cursor = parseCursor(typeof query.after === 'string' ? query.after : request.headers['last-event-id'] as string | undefined);
     const run = runs.get(params.id);
 
     if (!run) {
@@ -149,7 +177,8 @@ export const createApp = async () => {
       return reply.code(404).send({ error: 'Run not found.' });
     }
 
-    const cursor = parseCursor(typeof request.query.after === 'string' ? request.query.after : request.headers['last-event-id'] as string | undefined);
+    const query = request.query as Record<string, string | string[] | undefined>;
+    const cursor = parseCursor(typeof query.after === 'string' ? query.after : request.headers['last-event-id'] as string | undefined);
 
     reply.raw.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     reply.raw.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -167,23 +196,6 @@ export const createApp = async () => {
     let currentCursor = cursor;
     let closed = false;
 
-    for (const event of getEventsAfterCursor(run, cursor)) {
-      writeEvent(event);
-      currentCursor = Math.max(currentCursor, getEventSequence(event));
-    }
-
-    const unsubscribe = subscribeToRun(run.id, (updatedRun) => {
-      if (closed) {
-        return;
-      }
-
-      const nextEvents = getEventsAfterCursor(updatedRun, currentCursor);
-      for (const event of nextEvents) {
-        writeEvent(event);
-        currentCursor = Math.max(currentCursor, getEventSequence(event));
-      }
-    });
-
     const closeStream = () => {
       if (closed) {
         return;
@@ -193,6 +205,36 @@ export const createApp = async () => {
       unsubscribe();
       reply.raw.end();
     };
+
+    const flushRunEvents = (latestRun: RunSnapshot) => {
+      const nextEvents = getEventsAfterCursor(latestRun, currentCursor);
+      for (const event of nextEvents) {
+        writeEvent(event);
+        currentCursor = Math.max(currentCursor, getEventSequence(event));
+      }
+
+      if (isTerminalStatus(latestRun.status) && nextEvents.length > 0) {
+        closeStream();
+      }
+    };
+
+    const unsubscribe = subscribeToRun(run.id, (updatedRun) => {
+      if (closed) {
+        return;
+      }
+
+      flushRunEvents(updatedRun);
+    });
+
+    for (const event of getEventsAfterCursor(run, cursor)) {
+      writeEvent(event);
+      currentCursor = Math.max(currentCursor, getEventSequence(event));
+    }
+
+    if (isTerminalStatus(run.status)) {
+      closeStream();
+      return reply.code(200);
+    }
 
     request.raw.on('close', closeStream);
     request.raw.on('end', closeStream);
@@ -213,7 +255,9 @@ export const createApp = async () => {
     try {
       const result = createRun(request.body);
       setRun(result.run);
-      return reply.code(201).send(result);
+      void startSchedulerForRun(result.run);
+      // The scheduler has already recorded its first events synchronously; return the live snapshot.
+      return reply.code(201).send({ ...result, run: runs.get(result.run.id) ?? result.run });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Run creation failed.';
       return reply.code(400).send({ error: message });
@@ -228,9 +272,28 @@ export const createApp = async () => {
       return reply.code(404).send({ error: 'Run not found.' });
     }
 
-    const result = cancelRun(currentRun, request.body ?? {});
-    setRun(result.run);
-    return reply.code(200).send(result);
+    const parsed = cancelRunRequestSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: 'Invalid cancel request.' });
+    }
+
+    // A finished run keeps its real outcome.
+    if (isTerminalStatus(currentRun.status)) {
+      return reply.code(200).send({ run: currentRun, cancelled: false });
+    }
+
+    const reason = parsed.data.reason ?? 'Cancelled by operator.';
+    const scheduler = activeSchedulers.get(params.id);
+    if (scheduler) {
+      // Records the cancelled nodes and the terminal event synchronously through onEvent.
+      scheduler.cancel(reason);
+    } else {
+      recordEvent(params.id, { type: 'run-terminal', timestamp: new Date().toISOString(), status: 'cancelled', runId: params.id });
+    }
+
+    const cancelledRun = runs.get(params.id) ?? currentRun;
+    setRun({ ...cancelledRun, cancelReason: reason });
+    return reply.code(200).send({ run: runs.get(params.id), cancelled: true });
   });
 
   return app;

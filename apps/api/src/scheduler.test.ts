@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createWorkflowScheduler } from './scheduler.js';
-import type { Workflow } from './workflow.js';
+import { createControlledExecutor } from './testing.js';
+import type { ExecutionEvent, Workflow } from './workflow.js';
 
 const makeWorkflow = (nodes: Workflow['nodes'], edges: Workflow['edges']): Workflow => ({
   id: 'workflow-1',
@@ -8,6 +9,18 @@ const makeWorkflow = (nodes: Workflow['nodes'], edges: Workflow['edges']): Workf
   nodes,
   edges,
 });
+
+const node = (id: string, type: 'input' | 'transform' | 'output' = 'transform'): Workflow['nodes'][number] => {
+  if (type === 'output') {
+    return { id, type, position: { x: 0, y: 0 }, config: { label: id, description: '', sink: 'console' } };
+  }
+
+  return { id, type, position: { x: 0, y: 0 }, config: { label: id, description: '' } };
+};
+
+const edge = (source: string, target: string) => ({ id: `${source}-${target}`, source, target });
+
+const summarize = (events: ExecutionEvent[]) => events.map((event) => ('nodeId' in event ? `${event.type}:${event.nodeId}` : event.type));
 
 describe('workflow scheduler', () => {
   it('runs sequential dependencies in order', async () => {
@@ -103,69 +116,120 @@ describe('workflow scheduler', () => {
     expect(run.events.some((event) => event.type === 'node-skipped' && event.nodeId === 'join')).toBe(true);
   });
 
-  it('continues independent branches after a sibling failure', async () => {
-    const scheduler = createWorkflowScheduler({
-      maxConcurrency: 2,
-      delay: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      executionFn: async (node) => {
-        if (node.id === 'branch-a') {
-          return { status: 'failed', reason: 'branch-a failed' };
-        }
-        return { status: 'succeeded' };
-      },
-    });
+  it('makes dependents wait for every prerequisite even when slots are free', async () => {
+    const executor = createControlledExecutor();
+    const events: ExecutionEvent[] = [];
+    const scheduler = createWorkflowScheduler({ maxConcurrency: 4, executionFn: executor.executionFn, onEvent: (event) => events.push(event) });
 
-    const workflow = makeWorkflow(
-      [
-        { id: 'root', type: 'input', position: { x: 0, y: 0 }, config: { label: 'Root', description: 'Root input', defaultValue: 'root' } },
-        { id: 'branch-a', type: 'transform', position: { x: 200, y: 0 }, config: { label: 'A', description: 'Branch A', expression: 'a' } },
-        { id: 'branch-b', type: 'transform', position: { x: 200, y: 120 }, config: { label: 'B', description: 'Branch B', expression: 'b' } },
-      ],
-      [
-        { id: 'e1', source: 'root', target: 'branch-a' },
-        { id: 'e2', source: 'root', target: 'branch-b' },
-      ],
-    );
+    const runPromise = scheduler.run(makeWorkflow([node('a', 'input'), node('b', 'input'), node('c', 'output')], [edge('a', 'c'), edge('b', 'c')]));
 
-    const run = await scheduler.run(workflow);
+    expect(executor.started).toEqual(['a', 'b']);
+    expect(summarize(events)).toEqual(['run-started', 'node-started:a', 'node-started:b']);
 
-    expect(run.status).toBe('failed');
-    expect(run.events.some((event) => event.type === 'node-failed' && event.nodeId === 'branch-a')).toBe(true);
-    expect(run.events.some((event) => event.type === 'node-succeeded' && event.nodeId === 'branch-b')).toBe(true);
+    await executor.finish('a');
+    expect(executor.started).toEqual(['a', 'b']);
+
+    await executor.finish('b');
+    expect(executor.started).toEqual(['a', 'b', 'c']);
+
+    await executor.finish('c');
+    expect((await runPromise).status).toBe('succeeded');
   });
 
-  it('supports cancellation and prevents scheduling new nodes after cancel', async () => {
-    let started: string[] = [];
-    const scheduler = createWorkflowScheduler({
-      maxConcurrency: 2,
-      delay: async (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-      executionFn: async (node) => {
-        started.push(node.id);
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        return { status: 'succeeded' };
-      },
-    });
+  it('keeps running independent branches after a sibling fails', async () => {
+    const executor = createControlledExecutor();
+    const events: ExecutionEvent[] = [];
+    const scheduler = createWorkflowScheduler({ maxConcurrency: 4, executionFn: executor.executionFn, onEvent: (event) => events.push(event) });
 
-    const workflow = makeWorkflow(
-      [
-        { id: 'a', type: 'input', position: { x: 0, y: 0 }, config: { label: 'A', description: 'Input A', defaultValue: 'a' } },
-        { id: 'b', type: 'transform', position: { x: 200, y: 0 }, config: { label: 'B', description: 'Middle transform', expression: 'b' } },
-        { id: 'c', type: 'output', position: { x: 400, y: 0 }, config: { label: 'C', description: 'Final output', sink: 'console' } },
-      ],
-      [
-        { id: 'e1', source: 'a', target: 'b' },
-        { id: 'e2', source: 'b', target: 'c' },
-      ],
-    );
+    const runPromise = scheduler.run(makeWorkflow(
+      [node('root', 'input'), node('bad'), node('slow'), node('after-slow', 'output'), node('after-bad', 'output')],
+      [edge('root', 'bad'), edge('root', 'slow'), edge('slow', 'after-slow'), edge('bad', 'after-bad')],
+    ));
 
-    const runPromise = scheduler.run(workflow);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await executor.finish('root');
+    await executor.finish('bad', 'failed');
+
+    expect(summarize(events)).toContain('node-skipped:after-bad');
+    expect(events.some((event) => event.type === 'run-terminal')).toBe(false);
+
+    await executor.finish('slow');
+    await executor.finish('after-slow');
+    const run = await runPromise;
+
+    expect(run.status).toBe('failed');
+    expect(summarize(run.events)).toContain('node-succeeded:after-slow');
+    expect(run.events.filter((event) => event.type === 'run-terminal')).toHaveLength(1);
+    expect(run.events.at(-1)).toMatchObject({ type: 'run-terminal', status: 'failed' });
+  });
+
+  it('skips transitive dependents as soon as one prerequisite fails, regardless of node order', async () => {
+    const executor = createControlledExecutor();
+    const events: ExecutionEvent[] = [];
+    const scheduler = createWorkflowScheduler({ maxConcurrency: 4, executionFn: executor.executionFn, onEvent: (event) => events.push(event) });
+
+    const runPromise = scheduler.run(makeWorkflow(
+      [node('tail', 'output'), node('mid'), node('join', 'output'), node('bad', 'input'), node('slow', 'input')],
+      [edge('bad', 'mid'), edge('mid', 'tail'), edge('bad', 'join'), edge('slow', 'join')],
+    ));
+
+    await executor.finish('bad', 'failed');
+
+    // "join" is skipped immediately even though "slow" is still running.
+    expect(summarize(events)).toEqual(expect.arrayContaining(['node-skipped:mid', 'node-skipped:tail', 'node-skipped:join']));
+    expect(events.some((event) => event.type === 'run-terminal')).toBe(false);
+
+    await executor.finish('slow');
+    const run = await runPromise;
+
+    expect(run.status).toBe('failed');
+    expect(executor.started).toEqual(['bad', 'slow']);
+  });
+
+  it('cancels in-flight nodes immediately and never starts new ones', async () => {
+    const executor = createControlledExecutor();
+    const events: ExecutionEvent[] = [];
+    const scheduler = createWorkflowScheduler({ maxConcurrency: 2, executionFn: executor.executionFn, onEvent: (event) => events.push(event) });
+
+    const runPromise = scheduler.run(makeWorkflow([node('a', 'input'), node('b'), node('c', 'output')], [edge('a', 'b'), edge('b', 'c')]));
+    await executor.finish('a');
+    expect(executor.started).toEqual(['a', 'b']);
+
     scheduler.cancel('manual stop');
+
+    // Settled synchronously, before the in-flight executor has returned.
+    expect(events.at(-2)).toMatchObject({ type: 'node-skipped', nodeId: 'b', reason: 'manual stop' });
+    expect(events.at(-1)).toMatchObject({ type: 'run-terminal', status: 'cancelled' });
+
     const run = await runPromise;
 
     expect(run.status).toBe('cancelled');
+    expect(run.cancelReason).toBe('manual stop');
+    expect(executor.started).toEqual(['a', 'b']);
     expect(run.events.filter((event) => event.type === 'run-terminal')).toHaveLength(1);
-    expect(started.length).toBeLessThanOrEqual(2);
+    expect(run.events.at(-1)).toMatchObject({ type: 'run-terminal', status: 'cancelled' });
+  });
+
+  it('starts no nodes when cancelled before the run begins', async () => {
+    const executor = createControlledExecutor();
+    const scheduler = createWorkflowScheduler({ executionFn: executor.executionFn });
+
+    scheduler.cancel();
+    const run = await scheduler.run(makeWorkflow([node('a', 'input')], []));
+
+    expect(run.status).toBe('cancelled');
+    expect(executor.started).toEqual([]);
+  });
+
+  it('interrupts the default executor when cancelled', async () => {
+    const scheduler = createWorkflowScheduler({ random: () => 0.99, defaultFailureRate: 0 });
+    const runPromise = scheduler.run(makeWorkflow([node('a', 'input')], []));
+    const startedAt = Date.now();
+
+    scheduler.cancel();
+    const run = await runPromise;
+
+    expect(run.status).toBe('cancelled');
+    expect(Date.now() - startedAt).toBeLessThan(500);
   });
 
   it('emits exactly one terminal state event for a run', async () => {

@@ -77,6 +77,7 @@ const applyEventToNodeState = (
       [event.nodeId]: mergeNodeState(current, {
         nodeId: event.nodeId,
         status: 'running',
+        startedAt: event.timestamp,
         lastUpdatedAt: event.timestamp,
       }, 'queued'),
     };
@@ -291,9 +292,9 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       })));
 
     const nextSequence = normalizedEvents.length > 0 ? Math.max(...normalizedEvents.map((event) => normalizeSequence(event, 0))) : 0;
-    if (current.selectedRunId && current.selectedRunId !== snapshot.id && current.events.length > 0) {
-      // A different run is being selected; replace state completely so the UI does not mix runs.
-    } else if (current.selectedRunId === snapshot.id && nextSequence <= current.lastSequence) {
+    // A snapshot of the same run that is not newer than what we have would roll the UI back.
+    // A different run replaces state completely, including the cursor, so runs never mix.
+    if (current.selectedRunId === snapshot.id && nextSequence <= current.lastSequence) {
       return;
     }
 
@@ -303,7 +304,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     set({
       status: nextStatus,
       selectedRunId: snapshot.id ?? current.selectedRunId,
-      lastSequence: Math.max(current.lastSequence, nextSequence),
+      lastSequence: nextSequence,
       events: normalizedEvents,
       nodeStates: nextNodeStates,
     });
