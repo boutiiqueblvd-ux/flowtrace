@@ -14,6 +14,9 @@ export type GraphEdge = {
   id: string;
   source: string;
   target: string;
+  label?: string;
+  comment?: string;
+  branch?: 'yes' | 'no';
 };
 
 export type ExecutionNodeStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled';

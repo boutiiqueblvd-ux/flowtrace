@@ -15,8 +15,10 @@ interface GraphStore {
   validationMessage: ValidationMessage | null;
   addNode: (kind: WorkflowNodeType) => void;
   updateNode: (nodeId: string, updates: Partial<GraphNode['data']>) => void;
+  updateEdge: (edgeId: string, updates: Partial<GraphEdge>) => void;
   deleteNode: (nodeId: string) => void;
   deleteEdge: (edgeId: string) => void;
+  clearAllNodes: () => void;
   setSelectedNode: (nodeId: string | null) => void;
   setSelectedEdge: (edgeId: string | null) => void;
   setNodes: (changes: NodeChange[]) => void;
@@ -140,6 +142,18 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       ),
     }));
   },
+  updateEdge: (edgeId, updates) => {
+    set((state) => ({
+      edges: state.edges.map((edge) =>
+        edge.id === edgeId
+          ? {
+              ...edge,
+              ...updates,
+            }
+          : edge,
+      ),
+    }));
+  },
   deleteNode: (nodeId) => {
     set((state) => ({
       nodes: state.nodes.filter((node) => node.id !== nodeId),
@@ -154,6 +168,15 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       selectedEdgeId: state.selectedEdgeId === edgeId ? null : state.selectedEdgeId,
       validationMessage: { type: 'info', text: 'Connection removed.' },
     }));
+  },
+  clearAllNodes: () => {
+    set({
+      nodes: [],
+      edges: [],
+      selectedNodeId: null,
+      selectedEdgeId: null,
+      validationMessage: { type: 'info', text: 'Canvas cleared.' },
+    });
   },
   setSelectedNode: (nodeId) => set({ selectedNodeId: nodeId }),
   setSelectedEdge: (edgeId) => set({ selectedEdgeId: edgeId }),
@@ -208,7 +231,13 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
     }
 
     set((state) => ({
-      edges: [...state.edges, { id: `edge-${Date.now()}`, source: connection.source!, target: connection.target! }],
+      edges: [...state.edges, {
+        id: `edge-${Date.now()}`,
+        source: connection.source!,
+        target: connection.target!,
+        label: connection.sourceHandle === 'yes' ? 'Yes' : connection.sourceHandle === 'no' ? 'No' : 'Continue',
+        branch: connection.sourceHandle === 'yes' ? 'yes' : connection.sourceHandle === 'no' ? 'no' : undefined,
+      }],
       validationMessage: { type: 'info', text: 'Connection created.' },
     }));
   },

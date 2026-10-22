@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type CSSProperties } from 'react';
 import ReactFlow, { Background, Controls, MiniMap, type Connection, type Node, type Edge } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { ExecutionTimeline } from './components/ExecutionTimeline';
@@ -7,7 +7,7 @@ import { Toolbar } from './components/Toolbar';
 import { WorkflowNode } from './components/WorkflowNode';
 import { useExecutionStore } from './store/executionStore';
 import { useGraphStore } from './store/graphStore';
-import type { ExecutionEvent, WorkflowNodeType } from './types';
+import type { ExecutionEvent, GraphNode, WorkflowNodeType } from './types';
 
 const nodeTypes = {
   workflowNode: WorkflowNode,
@@ -56,8 +56,10 @@ export default function App() {
   const setEdges = useGraphStore.getState().setEdges;
   const onConnect = useGraphStore.getState().onConnect;
   const updateNode = useGraphStore.getState().updateNode;
+  const updateEdge = useGraphStore.getState().updateEdge;
   const deleteNode = useGraphStore.getState().deleteNode;
   const deleteEdge = useGraphStore.getState().deleteEdge;
+  const clearAllNodes = useGraphStore.getState().clearAllNodes;
   const clearValidationMessage = useGraphStore.getState().clearValidationMessage;
   const setExecutionStatus = useExecutionStore.getState().setStatus;
   const applyRunSnapshot = useExecutionStore.getState().applyRunSnapshot;
@@ -68,6 +70,19 @@ export default function App() {
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
+  const [leftWidth, setLeftWidth] = useState(260);
+  const [timelineWidth, setTimelineWidth] = useState(330);
+  const dragRef = useRef<{ type: 'left' | 'timeline'; startX: number; startValue: number } | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+  const isRunActive = execution.status === 'queued' || execution.status === 'running';
+  const executionStatusLabel = execution.status === 'idle' ? 'Not started' : execution.status === 'queued' ? 'Queued' : execution.status === 'running' ? 'Running' : execution.status === 'succeeded' ? 'Succeeded' : execution.status === 'failed' ? 'Failed' : 'Cancelled';
+  const shellStyle = useMemo<CSSProperties>(
+    () => ({
+      ['--left-width' as string]: `${leftWidth}px`,
+      ['--timeline-width' as string]: `${timelineWidth}px`,
+    }),
+    [leftWidth, timelineWidth],
+  );
   const selectedNodeData = useMemo(() => {
     return nodes.map((node) => ({
       ...node,
@@ -91,7 +106,53 @@ export default function App() {
   }, [clearValidationMessage, validationMessage]);
 
   useEffect(() => {
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!dragRef.current) {
+        return;
+      }
+
+      const delta = event.clientX - dragRef.current.startX;
+
+      if (dragRef.current.type === 'left') {
+        setLeftWidth(Math.min(420, Math.max(180, dragRef.current.startValue + delta)));
+      }
+
+      if (dragRef.current.type === 'timeline') {
+        setTimelineWidth(Math.min(420, Math.max(240, dragRef.current.startValue - delta)));
+      }
+    };
+
+    const handleMouseUp = () => {
+      dragRef.current = null;
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      const isSelectAll = (event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a';
+
+      if (isSelectAll) {
+        event.preventDefault();
+        if (nodes.length === 0) {
+          return;
+        }
+
+        useGraphStore.setState((state) => ({
+          nodes: state.nodes.map((node) => ({ ...node, selected: true })),
+          selectedNodeId: state.nodes[0]?.id ?? null,
+          selectedEdgeId: null,
+        }));
+        return;
+      }
+
       if (event.key === 'Escape') {
         setSelectedNode(null);
         setSelectedEdge(null);
@@ -100,10 +161,144 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [setSelectedEdge, setSelectedNode]);
+  }, [nodes.length, setSelectedEdge, setSelectedNode]);
+
+  const normalizeImportedWorkflow = (workflow: any) => {
+    const importedNodes = Array.isArray(workflow?.nodes) ? workflow.nodes : [];
+    const importedEdges = Array.isArray(workflow?.edges) ? workflow.edges : [];
+
+    const nextNodes: GraphNode[] = importedNodes.map((node: any, index: number) => ({
+      id: String(node?.id ?? `node-${index + 1}`),
+      type: 'workflowNode',
+      position: {
+        x: Number.isFinite(node?.position?.x) ? Number(node.position.x) : 160 + (index % 3) * 220,
+        y: Number.isFinite(node?.position?.y) ? Number(node.position.y) : 120 + Math.floor(index / 3) * 200,
+      },
+      data: {
+        kind: ['input', 'transform', 'output'].includes(node?.type) ? node.type : 'transform',
+        label: node?.config?.label ?? String(node?.id ?? `Node ${index + 1}`),
+        description: node?.config?.description ?? 'Imported workflow node.',
+      },
+    }));
+
+    const nextEdges = importedEdges.map((edge: any, index: number) => ({
+      id: String(edge?.id ?? `edge-${index + 1}`),
+      source: String(edge?.source ?? ''),
+      target: String(edge?.target ?? ''),
+      label: String(edge?.label ?? (edge?.branch === 'yes' ? 'Yes' : edge?.branch === 'no' ? 'No' : 'Continue')),
+      comment: typeof edge?.comment === 'string' ? edge.comment : '',
+      branch: edge?.branch === 'yes' || edge?.branch === 'no' ? edge.branch : undefined,
+    }));
+
+    return { nodes: nextNodes, edges: nextEdges };
+  };
+
+  const loadWorkflow = (workflow: any) => {
+    const { nodes: nextNodes, edges: nextEdges } = normalizeImportedWorkflow(workflow);
+    useGraphStore.setState({
+      nodes: nextNodes,
+      edges: nextEdges,
+      selectedNodeId: nextNodes[0]?.id ?? null,
+      selectedEdgeId: null,
+      validationMessage: {
+        type: 'info',
+        text: `Loaded workflow "${workflow?.name ?? workflow?.id ?? 'sample'}".`,
+      },
+    });
+  };
 
   const handleAddNode = (kind: WorkflowNodeType) => {
     addNode(kind);
+  };
+
+  const handleClearAllNodes = () => {
+    clearAllNodes();
+  };
+
+  const handleExportWorkflow = () => {
+    const workflow = {
+      id: `${(graph.nodes[0]?.id ?? 'workflow').toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'flowtrace-workflow'}-${Date.now()}`,
+      name: 'FlowTrace sample workflow',
+      nodes: nodes.map((node) => ({
+        id: node.id,
+        type: node.data.kind,
+        position: {
+          x: Math.round(node.position.x),
+          y: Math.round(node.position.y),
+        },
+        config: {
+          label: node.data.label,
+          description: node.data.description,
+          ...(node.data.kind === 'input' ? { defaultValue: '' } : {}),
+          ...(node.data.kind === 'transform' ? { expression: 'value' } : {}),
+          ...(node.data.kind === 'output' ? { sink: 'console' } : {}),
+        },
+      })),
+      edges: edges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        label: edge.label ?? (edge.branch === 'yes' ? 'Yes' : edge.branch === 'no' ? 'No' : 'Continue'),
+        comment: edge.comment ?? '',
+        branch: edge.branch,
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(workflow, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${workflow.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'flowtrace-workflow'}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+
+    useGraphStore.setState({
+      validationMessage: { type: 'info', text: 'Workflow exported as JSON.' },
+    });
+  };
+
+  const handleImportWorkflow = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      loadWorkflow(parsed);
+    } catch (error) {
+      useGraphStore.setState({
+        validationMessage: { type: 'error', text: 'That file is not a valid FlowTrace workflow JSON file.' },
+      });
+    }
+
+    event.target.value = '';
+  };
+
+  const handleLoadSampleWorkflow = async () => {
+    useExecutionStore.setState({
+      status: 'idle',
+      selectedRunId: null,
+      lastSequence: 0,
+      events: [],
+      nodeStates: {},
+      selectedNodeId: null,
+    });
+
+    try {
+      const response = await fetch('/sample-workflow.json');
+      if (!response.ok) {
+        throw new Error('Sample file not found.');
+      }
+
+      const parsed = await response.json();
+      loadWorkflow(parsed);
+    } catch (error) {
+      useGraphStore.setState({
+        validationMessage: { type: 'error', text: 'Unable to load the sample workflow file.' },
+      });
+    }
   };
 
   const handleConnect = (connection: Connection) => {
@@ -133,7 +328,7 @@ export default function App() {
         id: 3 + index * 2,
         sequence: 3 + index * 2,
         type: 'node-started',
-        timestamp: new Date(Date.now() + 100 + index * 250).toISOString(),
+        timestamp: new Date(Date.now() + 150 + index * 250).toISOString(),
         nodeId: node.id,
         runId,
       });
@@ -142,26 +337,39 @@ export default function App() {
         id: 4 + index * 2,
         sequence: 4 + index * 2,
         type: 'node-succeeded',
-        timestamp: new Date(Date.now() + 450 + index * 250).toISOString(),
+        timestamp: new Date(Date.now() + 500 + index * 250).toISOString(),
         nodeId: node.id,
         runId,
         output: { value: `processed-${node.id}` },
       });
     });
 
-    events.push({
+    const finishedEvent = {
       id: events.length + 1,
       sequence: events.length + 1,
-      type: 'run-terminal',
-      timestamp: new Date(Date.now() + 800).toISOString(),
-      status: 'succeeded',
+      type: 'run-terminal' as const,
+      timestamp: new Date(Date.now() + 900).toISOString(),
+      status: 'succeeded' as const,
       runId,
-    });
+    };
 
-    applyRunSnapshot({ id: runId, workflowId: 'workflow-1', status: 'succeeded', events });
-    setExecutionStatus('succeeded');
+    applyRunSnapshot({ id: runId, workflowId: 'workflow-1', status: 'running', events });
+    setExecutionStatus('running');
     setSelectedNode(nodes[0]?.id ?? null);
     setSelectedExecutionNode(nodes[0]?.id ?? null);
+
+    if (runRef.current) {
+      window.clearTimeout(runRef.current);
+    }
+
+    runRef.current = window.setTimeout(() => {
+      if (runCancelledRef.current) {
+        return;
+      }
+
+      applyRunSnapshot({ id: runId, workflowId: 'workflow-1', status: 'succeeded', events: [...events, finishedEvent] });
+      setExecutionStatus('succeeded');
+    }, 1300);
   };
 
   const handleCancelWorkflow = () => {
@@ -185,16 +393,41 @@ export default function App() {
     setExecutionStatus('cancelled');
   };
 
+  const beginResize = (type: 'left' | 'timeline', event: React.MouseEvent<HTMLDivElement>) => {
+    dragRef.current = {
+      type,
+      startX: event.clientX,
+      startValue: type === 'left' ? leftWidth : timelineWidth,
+    };
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
-        <div>
+        <div className="topbar-main">
           <p className="eyebrow">Workflow Studio</p>
-          <h1>FlowTrace</h1>
+          <div className="title-row">
+            <h1>FlowTrace</h1>
+            <span className={`status-pill status-${execution.status}`}>{executionStatusLabel}</span>
+          </div>
         </div>
         <div className="topbar-actions">
-          <button type="button" onClick={clearValidationMessage}>Clear feedback</button>
-          {execution.status === 'queued' || execution.status === 'running' ? (
+          <button type="button" className="secondary-button" onClick={() => importInputRef.current?.click()}>
+            Import workflow
+          </button>
+          <button type="button" className="secondary-button" onClick={handleExportWorkflow}>
+            Export workflow
+          </button>
+          <button type="button" className="secondary-button" onClick={handleLoadSampleWorkflow}>
+            Load sample
+          </button>
+          <button type="button" className="secondary-button" onClick={clearValidationMessage}>
+            Clear feedback
+          </button>
+          <button type="button" className="secondary-button" onClick={handleClearAllNodes}>
+            Clear all
+          </button>
+          {isRunActive ? (
             <button type="button" className="warning-button" onClick={handleCancelWorkflow}>
               Cancel run
             </button>
@@ -206,20 +439,52 @@ export default function App() {
         </div>
       </header>
 
-      <main className="workspace">
-        <Toolbar onAddNode={handleAddNode} />
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".json,application/json"
+        hidden
+        onChange={handleImportWorkflow}
+      />
 
-        <section className="canvas-panel">
+      <main className="workspace" style={shellStyle}>
+        <div className="left-panel">
+          <Toolbar onAddNode={handleAddNode} />
+          <div className="left-panel__inspector">
+            <NodeInspectorPanel
+              selectedNode={selectedNode}
+              selectedEdge={selectedEdge}
+              executionInfo={selectedNodeId ? execution.nodeStates[selectedNodeId] ?? null : null}
+              onChange={updateNode}
+              onUpdateEdge={updateEdge}
+              onDeleteNode={deleteNode}
+              onDeleteEdge={deleteEdge}
+            />
+          </div>
+        </div>
+
+        <div
+          className="resizer resizer-toolbar"
+          onMouseDown={(event) => beginResize('left', event)}
+          aria-label="Resize left sidebar"
+          role="separator"
+        />
+
+        <section className="canvas-panel main-stage-panel">
           <div className="canvas-header">
-            <span>Workflow canvas</span>
-            <span>{nodes.length} nodes</span>
+            <div>
+              <span className="panel-label">Workflow canvas</span>
+              <strong>{nodes.length} nodes</strong>
+            </div>
+            <span className="canvas-summary">{edges.length} connections</span>
           </div>
 
           <div className="canvas-surface">
             {nodes.length === 0 ? (
               <div className="empty-state-card">
+                <div className="empty-state-icon">+</div>
                 <h3>Start your workflow</h3>
-                <p>Add an input, transform, or output node to begin modeling your process.</p>
+                <p>Add an input, transform, or output node to define the flow and begin execution.</p>
               </div>
             ) : (
               <ReactFlow
@@ -258,7 +523,16 @@ export default function App() {
               </div>
             )}
           </div>
+        </section>
 
+        <div
+          className="resizer resizer-timeline"
+          onMouseDown={(event) => beginResize('timeline', event)}
+          aria-label="Resize timeline"
+          role="separator"
+        />
+
+        <aside className="timeline-panel">
           <div className="execution-inspector">
             <div className="execution-inspector__header">
               <h3>Execution timeline</h3>
@@ -274,16 +548,7 @@ export default function App() {
               }}
             />
           </div>
-        </section>
-
-        <NodeInspectorPanel
-          selectedNode={selectedNode}
-          selectedEdge={selectedEdge}
-          executionInfo={selectedNodeId ? execution.nodeStates[selectedNodeId] ?? null : null}
-          onChange={updateNode}
-          onDeleteNode={deleteNode}
-          onDeleteEdge={deleteEdge}
-        />
+        </aside>
       </main>
 
       <footer className="statusbar">

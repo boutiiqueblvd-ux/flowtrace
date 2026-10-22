@@ -16,7 +16,7 @@ export function WorkflowNode({ data, selected }: NodeProps<WorkflowNodeData>) {
       style={{ borderColor: style.accent }}
     >
       {data.kind !== 'input' && (
-        <Handle type="target" position={Position.Left} className="node-handle node-handle-in" />
+        <Handle type="target" position={Position.Left} className="node-handle node-handle-in" id="in" />
       )}
       <div className="workflow-node__header">
         <span className="workflow-node__badge" style={{ background: style.accent }}>
@@ -28,7 +28,7 @@ export function WorkflowNode({ data, selected }: NodeProps<WorkflowNodeData>) {
         <small>{data.description}</small>
       </div>
       {data.kind !== 'output' && (
-        <Handle type="source" position={Position.Right} className="node-handle node-handle-out" />
+        <Handle type="source" position={Position.Right} className="node-handle node-handle-out" id="default" />
       )}
     </div>
   );

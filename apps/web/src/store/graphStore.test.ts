@@ -54,4 +54,24 @@ describe('graph editor store', () => {
       text: 'This connection creates a cycle and is not allowed.',
     });
   });
+
+  it('clears all nodes and edges from the canvas', () => {
+    useGraphStore.setState({
+      nodes: [
+        { id: 'Input1', type: 'workflowNode', position: { x: 0, y: 0 }, data: { kind: 'input', label: 'Input', description: 'Entry point' } },
+        { id: 'Transform1', type: 'workflowNode', position: { x: 200, y: 100 }, data: { kind: 'transform', label: 'Transform', description: 'Process' } },
+      ],
+      edges: [{ id: 'edge-1', source: 'Input1', target: 'Transform1' }],
+      selectedNodeId: 'Input1',
+      selectedEdgeId: 'edge-1',
+      validationMessage: null,
+    });
+
+    useGraphStore.getState().clearAllNodes();
+
+    expect(useGraphStore.getState().nodes).toEqual([]);
+    expect(useGraphStore.getState().edges).toEqual([]);
+    expect(useGraphStore.getState().selectedNodeId).toBeNull();
+    expect(useGraphStore.getState().selectedEdgeId).toBeNull();
+  });
 });

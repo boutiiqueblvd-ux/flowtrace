@@ -5,6 +5,7 @@ interface NodeInspectorPanelProps {
   selectedEdge: GraphEdge | null;
   executionInfo: NodeExecutionInfo | null;
   onChange: (nodeId: string, updates: Partial<GraphNode['data']>) => void;
+  onUpdateEdge: (edgeId: string, updates: Partial<GraphEdge>) => void;
   onDeleteNode: (nodeId: string) => void;
   onDeleteEdge: (edgeId: string) => void;
 }
@@ -16,6 +17,7 @@ export function NodeInspectorPanel({
   selectedEdge,
   executionInfo,
   onChange,
+  onUpdateEdge,
   onDeleteNode,
   onDeleteEdge,
 }: NodeInspectorPanelProps) {
@@ -30,8 +32,37 @@ export function NodeInspectorPanel({
             </button>
           </div>
         </div>
+
         <div className="panel-section">
-          <p className="empty-state">From {selectedEdge.source} to {selectedEdge.target}</p>
+          <p className="empty-state">{selectedEdge.source} → {selectedEdge.target}</p>
+        </div>
+
+        <div className="panel-section">
+          <label>
+            Label
+            <input
+              value={selectedEdge.label ?? ''}
+              onChange={(event) =>
+                onUpdateEdge(selectedEdge.id, {
+                  label: event.target.value,
+                })
+              }
+              placeholder="e.g. Approve"
+            />
+          </label>
+
+          <label>
+            Comment
+            <textarea
+              value={selectedEdge.comment ?? ''}
+              onChange={(event) =>
+                onUpdateEdge(selectedEdge.id, {
+                  comment: event.target.value,
+                })
+              }
+              placeholder="Add a note for this condition or handoff."
+            />
+          </label>
         </div>
       </aside>
     );
@@ -42,7 +73,7 @@ export function NodeInspectorPanel({
       <aside className="sidebar-panel">
         <div className="panel-section">
           <h3>Execution details</h3>
-          <p className="empty-state">Select a node to inspect its execution state.</p>
+          <p className="empty-state">Select a node to review its status and output.</p>
         </div>
       </aside>
     );
@@ -54,7 +85,10 @@ export function NodeInspectorPanel({
     <aside className="sidebar-panel">
       <div className="panel-section panel-section--tight">
         <div className="panel-heading">
-          <h3>{selectedNode.data.label}</h3>
+          <div>
+            <span className="panel-label">Node</span>
+            <h3>{selectedNode.data.label}</h3>
+          </div>
           <button type="button" className="danger-button" onClick={() => onDeleteNode(selectedNode.id)}>
             Delete
           </button>
@@ -73,7 +107,7 @@ export function NodeInspectorPanel({
           </div>
           <div>
             <span className="meta-label">Duration</span>
-            <strong>{executionInfo?.durationMs ? `${executionInfo.durationMs} ms` : 'Not available'}</strong>
+            <strong>{executionInfo?.durationMs ? `${executionInfo.durationMs} ms` : 'N/A'}</strong>
           </div>
         </div>
 

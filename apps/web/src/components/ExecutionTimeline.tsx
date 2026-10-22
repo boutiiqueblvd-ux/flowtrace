@@ -52,6 +52,16 @@ const labelForEvent = (event: ExecutionEvent) => {
   return event.type;
 };
 
+const eventTypeLabel = (event: ExecutionEvent) => {
+  if (event.type === 'run-terminal') return 'Final';
+  if (event.type === 'run-cancelled') return 'Cancelled';
+  if (event.type === 'node-failed') return 'Failure';
+  if (event.type === 'node-skipped') return 'Skipped';
+  if (event.type === 'node-started') return 'Start';
+  if (event.type === 'node-succeeded') return 'Success';
+  return event.type.replace('run-', '').replace('node-', '');
+};
+
 export function ExecutionTimeline({ events, selectedEventId, onSelectEvent, onSelectNode }: ExecutionTimelineProps) {
   return (
     <div className="execution-timeline" aria-label="Execution timeline">
@@ -62,15 +72,16 @@ export function ExecutionTimeline({ events, selectedEventId, onSelectEvent, onSe
           const isSelected = selectedEventId === event.id;
           const eventLabel = labelForEvent(event);
           const isNodeEvent = Boolean(event.nodeId);
+          const isErrorEvent = event.type === 'node-failed' || (event.type === 'run-terminal' && event.status === 'failed') || event.type === 'run-cancelled';
 
           return (
             <div
               key={event.id ?? `${event.type}-${event.timestamp}`}
-              className={`timeline-event ${isSelected ? 'selected' : ''} ${event.type === 'node-failed' || event.type === 'run-terminal' && event.status === 'failed' ? 'error' : ''}`}
+              className={`timeline-event ${isSelected ? 'selected' : ''} ${isErrorEvent ? 'error' : ''}`}
             >
               <div className="timeline-meta">
                 <span>{formatTimestamp(event.timestamp)}</span>
-                <span>{event.type}</span>
+                <span className="timeline-tag">{eventTypeLabel(event)}</span>
               </div>
 
               <div className="timeline-body">

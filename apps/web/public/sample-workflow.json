@@ -1,0 +1,86 @@
+{
+  "id": "sample-account-activation",
+  "name": "Customer onboarding review",
+  "nodes": [
+    {
+      "id": "input-1",
+      "type": "input",
+      "position": { "x": 120, "y": 180 },
+      "config": {
+        "label": "New account request",
+        "description": "Receives the new customer profile and pipeline source.",
+        "defaultValue": "{\"customerId\":\"CUST-1847\",\"plan\":\"enterprise\",\"source\":\"partner\",\"riskProfile\":\"medium\"}"
+      }
+    },
+    {
+      "id": "transform-1",
+      "type": "transform",
+      "position": { "x": 420, "y": 120 },
+      "config": {
+        "label": "Validate customer profile",
+        "description": "Checks required fields, legal entity match, and account completeness.",
+        "expression": "value.customerId && value.plan && value.source"
+      }
+    },
+    {
+      "id": "transform-2",
+      "type": "transform",
+      "position": { "x": 420, "y": 340 },
+      "config": {
+        "label": "Assess risk and fit",
+        "description": "Reviews risk score, product fit, and sales coverage before activation.",
+        "expression": "value.riskProfile === 'medium' || value.riskProfile === 'low'"
+      }
+    },
+    {
+      "id": "transform-3",
+      "type": "transform",
+      "position": { "x": 760, "y": 70 },
+      "config": {
+        "label": "Prepare activation package",
+        "description": "Collects onboarding artifacts and creates the account setup task list.",
+        "expression": "value.customerId && value.plan"
+      }
+    },
+    {
+      "id": "transform-4",
+      "type": "transform",
+      "position": { "x": 760, "y": 350 },
+      "config": {
+        "label": "Route for manual review",
+        "description": "Escalates edge cases to account specialists if the approval threshold is not met.",
+        "expression": "value.riskProfile === 'high' || value.source === 'enterprise'"
+      }
+    },
+    {
+      "id": "output-1",
+      "type": "output",
+      "position": { "x": 1060, "y": 120 },
+      "config": {
+        "label": "Queue activation",
+        "description": "Creates the onboarding task and sends the launch notification.",
+        "sink": "console"
+      }
+    },
+    {
+      "id": "output-2",
+      "type": "output",
+      "position": { "x": 1060, "y": 360 },
+      "config": {
+        "label": "Notify revenue ops",
+        "description": "Alerts the sales operations queue to gather missing documentation.",
+        "sink": "slack"
+      }
+    }
+  ],
+  "edges": [
+    { "id": "edge-1", "source": "input-1", "target": "transform-1", "label": "Continue", "branch": null },
+    { "id": "edge-2", "source": "input-1", "target": "transform-2", "label": "Review", "branch": null },
+    { "id": "edge-3", "source": "transform-1", "target": "transform-3", "label": "Yes", "branch": "yes" },
+    { "id": "edge-4", "source": "transform-1", "target": "transform-4", "label": "No", "branch": "no" },
+    { "id": "edge-5", "source": "transform-2", "target": "transform-3", "label": "Approved", "branch": null },
+    { "id": "edge-6", "source": "transform-2", "target": "output-2", "label": "Needs review", "branch": null },
+    { "id": "edge-7", "source": "transform-3", "target": "output-1", "label": "Continue", "branch": null },
+    { "id": "edge-8", "source": "transform-4", "target": "output-2", "label": "Escalate", "branch": null }
+  ]
+}
