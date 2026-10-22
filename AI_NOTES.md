@@ -2,189 +2,156 @@
 
 ## 1. Purpose and scope
 
-AI assistance in this project was used primarily to accelerate implementation: scaffolding the app, suggesting the initial architecture, proposing validation rules, writing the scheduler, and iterating on the UI and workflow model. The AI was useful for producing concrete code and structured options quickly, but it did not determine the final product constraints or acceptance criteria.
+AI assistance was used to scaffold the project, propose the architecture, write the validation layer and scheduler, iterate on the UI, and later to review and correct the frontend–backend integration. The developer set the scope and the acceptance criteria. The developer also decided what to ask for and when to stop.
 
-The meaningful engineering decisions were made by the developer: the boundaries between editor state and execution state, the UX priorities for a one-screen workflow studio, the requirement for clear validation feedback, and the decision to keep the system intentionally small and inspectable instead of broadening it into a full orchestration platform.
+This document records:
 
-This document therefore distinguishes implementation support from product and engineering judgment.
+- the iterations that materially shaped the result,
+- the architectural corrections made during the integration review, with evidence for each,
+- which decisions were AI suggestions and which were the developer's.
 
-## 2. Most consequential prompts used
+Entries in §2 predate the integration review. Their exact wording is not available, so they are **reconstructed summaries** from the repository and git history. The entries in §3 come from the recorded session and are concrete.
 
-The entries below are intentionally limited to the iterations that materially shaped the final result. Where the exact historical wording is not available from the repo or transcript, the text is labeled as a reconstructed summary of the iteration rather than a verbatim prompt.
+## 2. Consequential iterations before the integration review (reconstructed)
 
-### 1) Reconstructed summary of the initial architecture framing
-- Objective: Define the project skeleton, the workflow model, the validation approach, the scheduler, and the runtime/eventing strategy before implementation.
-- Constraint or concern: The work had to be narrow enough for a timeboxed assessment while still feeling credible as a production-like engineering exercise.
-- Resulting change: The project was structured around a small React + Vite frontend and a Fastify API with validation, DAG execution, and SSE-style runtime observability.
-- Evaluation: The codebase still reflects these boundaries, which makes this iteration foundational rather than incidental.
+1. **Architecture framing.** The developer defined a narrow scope: a React + Vite editor and a Fastify API with validation, DAG execution, and an SSE event stream. The repository still follows these boundaries.
+2. **Verification-first baseline.** Test results were reported only after running the actual suite, not from reading the code.
+3. **UI clarity.** Run and cancel controls, the panel hierarchy, and the status labelling were made more obvious without changing the architecture.
+4. **Import, export, and sample workflow.** A realistic sample workflow and JSON import/export were added so reviewers do not have to build a graph by hand.
+5. **Invalid-connection feedback.** The editor already blocked cycles and invalid edges, but did so silently. Validation messages now explain why.
+6. **Branch semantics in the sample.** Edge labels, comments, and `yes`/`no` branch metadata were added to the sample and the editor. *Correction recorded in §3: these remain visual only, and execution ignores them.*
+7. **Layout and connector geometry.** The canvas no longer overlaps the footer, and edges now attach to node boundaries.
 
-### 2) Reconstructed summary of the verification-first pass
-- Objective: Confirm whether the repo was actually healthy before making claims about progress or readiness.
-- Constraint or concern: Assumptions about the implementation could not be trusted without fresh evidence.
-- Resulting change: The actual test suite was run and reported instead of relying on code inspection only.
-- Evaluation: This established the project baseline and prevented false confidence about the implementation state.
+## 3. Integration review: architectural corrections
 
-### 3) Reconstructed summary of the interface clarity iteration
-- Objective: Make the workflow editor easier to understand without changing the underlying architecture.
-- Constraint or concern: The product needed obvious run/cancel actions, legible status, and a calmer visual hierarchy that did not distract from the workflow itself.
-- Resulting change: The top-level controls, panel arrangement, and run status presentation were adjusted to improve clarity.
-- Evaluation: The later UI is more explicit and easier to use than the earlier treatment, which is consistent with the stated product goals.
+### What triggered it
 
-### 4) Reconstructed summary of the workflow import/export and sample iteration
-- Objective: Allow realistic workflows to be loaded and preserved without forcing the user to build a graph manually.
-- Constraint or concern: A credible example workflow was needed for review and testing, not just a blank canvas.
-- Resulting change: Import/export support and a more realistic sample workflow were introduced.
-- Evaluation: The project includes export/import flows and a richer sample workflow that can be used directly in the editor.
+The developer asked for a skeptical staff-engineer review of the whole run lifecycle, before any code changes. It covered six scenarios: run, execution events, concurrent branches, failure, cancellation, and reconnection. For each scenario the review had to separate behavior proven by tests from behavior only inferred from the code.
 
-### 5) Reconstructed summary of the invalid-connection feedback iteration
-- Objective: Ensure graph validation failures were visible to the human user instead of failing silently.
-- Constraint or concern: The app could detect invalid edges and cycles in logic, but the UI did not communicate why the action had been rejected.
-- Resulting change: The workflow editor surfaced validation feedback when an edge or cycle was blocked.
-- Evaluation: The graph logic still rejects invalid connections, and the UX now gives the user a clear reason rather than a silent no-op.
+The existing suite (8 web tests and 17 API tests) passed, along with the type checks and the build. The AI then wrote throwaway probe scripts outside the repository that drove the real modules with slow executors. All six scenarios showed defects. The developer approved fixing all six. A later documentation review found one more gap, which was not fixed.
 
-### 6) Reconstructed summary of the sample realism and branching iteration
-- Objective: Make the sample workflow feel like a real operational process rather than a toy graph.
-- Constraint or concern: The example needed to communicate branching, condition semantics, and commentary on transitions.
-- Resulting change: The sample workflow was expanded and edge metadata was added for labels and comments.
-- Evaluation: The final workflow model supports edge labels and comments, which aligns with the intended realism of the sample.
+The common root cause: **most tests used executors that finish instantly**. With instant executors, a scheduler that streams events and one that dumps them at the end look the same, and so do a failure policy that stops the run and one that lets other branches finish.
 
-### 7) Reconstructed summary of the first-screen layout and connector geometry fix
-- Objective: Remove visual defects from the initial screen and correct edge anchor alignment.
-- Constraint or concern: The canvas should not overlap the footer, and connectors should originate from the correct boundary rather than the interior of a node.
-- Resulting change: Layout sizing and node/edge geometry were adjusted for a tighter, more balanced editor shell.
-- Evaluation: The updated layout and geometry are consistent with the final visual treatment and the project requirements around usability and correctness.
+### Correction 1: events were not live
 
-## 3. Development process and consequential prompts
+- **Problem.** `scheduler.run()` collected events in a local array and returned them only when the run finished. The API merged them into the run in one step at the end. In the probe, a 3-node run with 100 ms per node delivered `run-created` at +3 ms and then every other event together at +330 ms. Halfway through the run, `GET /runs/:id` showed only `run-created` and status `queued`.
+- **Change.**
+  - Added an `onEvent` callback to the scheduler, called synchronously for each event.
+  - The API's new `recordEvent` appends each event, assigns its sequence once, and derives the status (`running` and the terminal status).
+  - Removed `reindexEvents`, which renumbered and re-sorted the whole log on every update and so made cursors unstable.
+- **Evidence.** After the fix, the same probe received four batches at +3, +112, +223, and +334 ms. New test: `index.test.ts`, "streams each event over SSE before the run finishes".
 
-The entries below capture the most materially consequential iterations in the project. They are based on the available prompt history, repository evidence, and git history rather than a long list of minor suggestions.
+### Correction 2: the first failure ended the whole run
 
-### 1) Initial project architecture and scope
+- **Problem.** `ensureTerminalState` ended the run as soon as any node failed, and the loop exited. Probe:
+  - In `root → bad` / `root → slow → after-slow`, the run ended `failed` while `slow` was still running. `after-slow` never started.
+  - A `join` node with one failed parent and one parent still running stayed `queued` forever, with no event.
 
-- Objective: Define the project structure, core types, validation rules, execution model, cancel semantics, frontend architecture, and risks before implementation.
-- Constraint or concern: The deliverable needed to be a focused assessment project with a believable architecture, not a broad platform.
-- Resulting change: The repo was scaffolded around a React + Vite frontend and a Fastify API, with a workflow editor, validation layer, scheduler, and SSE-based execution stream.
-- Evaluation: The repository structure and implementation match this intended scope, and the subsequent code follows the same boundaries.
+  The existing test "continues independent branches after a sibling failure" passed only because both branches finished in the same microtask flush.
+- **Change.**
+  - The loop now runs until every in-flight node settles.
+  - A node is skipped as soon as **any** prerequisite ends without succeeding.
+  - Skips are propagated repeatedly until nothing changes, so dependents of dependents are skipped whatever order the nodes are declared in.
+- **Evidence.** New `scheduler.test.ts` tests use `createControlledExecutor` (`testing.ts`), in which nodes finish only when the test says so. They cover independent branches after a failure, transitive skips in reverse declaration order, and prerequisites waiting with free slots.
 
-### 2) Verification-first review of the implementation
+### Correction 3: a second run in the same session lost its events
 
-- Objective: Confirm the actual project state instead of assuming the build was healthy.
-- Constraint or concern: The repository needed evidence before progress claims were made.
-- Resulting change: The project was validated by running the real test suite rather than relying on code inspection alone.
-- Evaluation: This produced the actual verification baseline used later in the project.
+- **Problem.** `applyRunSnapshot` kept `Math.max(previous cursor, new cursor)` when it switched to a different run. Separately, `loadRunStream` built its `?after=` cursor from a stale React render closure. Probe: after a 9-event run, events 2–5 of the next run were all dropped. Live `node-started` events also never set `startedAt`, so durations were reported as 0 ms.
+- **Change.**
+  - A different run now replaces the store state, including the cursor.
+  - The stream reads its cursor from `useExecutionStore.getState()` each time it connects.
+  - `node-started` now records `startedAt`.
+- **Evidence.** New `executionStore.test.ts` tests: "resets the cursor when a different run is loaded…" and "computes node duration from live events".
 
-### 3) UI clarity and action visibility
+### Correction 4: cancellation erased history and could change a finished run
 
-- Objective: Improve the main workflow experience without changing the architectural model.
-- Constraint or concern: The primary workflow actions had to be obvious, the status messaging needed to be readable, and the UI had to stay calm and not overload the user.
-- Resulting change: The top-level workflow controls, panel hierarchy, and status labeling were revised to improve discoverability and reduce visual noise.
-- Evaluation: The final UI structure is deliberately simpler and more explicit than the earlier treatment, and the behavior is aligned with the project’s editor-first design.
+- **Problem.**
+  - When the scheduler finished after a cancel, the API saw the cancel's terminal event and discarded every scheduler event. The history showed only `run-created, run-terminal`, although nodes `a` and `b` had run.
+  - Cancelling a run that had already succeeded returned 200 and changed its status to `cancelled`, while its last event still said `succeeded`.
+  - The default executor ignored `AbortSignal`.
+- **Change.**
+  - The scheduler now owns cancellation. `cancel()` synchronously records the in-flight nodes as cancelled, aborts their signals, and emits `run-terminal: cancelled` through the same event log.
+  - Cancelling a finished run is a no-op that returns `cancelled: false`.
+  - The default delay can now be interrupted by the abort signal.
+  - The scheduler no longer resets its cancel flag inside `run()`, so a cancel that arrives before the run starts is honored.
+- **Evidence.** New tests:
+  - `scheduler.test.ts`: "cancels in-flight nodes immediately and never starts new ones", "starts no nodes when cancelled before the run begins", and "interrupts the default executor when cancelled".
+  - `index.test.ts`: "cancels the real scheduler and keeps the history of nodes that ran" and "treats cancelling a finished run as a no-op".
+- **Remaining limit, documented rather than claimed away.** Cancellation is cooperative. An executor that ignores `AbortSignal` is not interrupted. In-flight nodes are reported as `node-skipped`; there is no `node-cancelled` event.
 
-### 4) Import/export and sample workflow support
+### Correction 5: the client had no reconnection
 
-- Objective: Let the user test realistic workflows without rebuilding a graph from scratch and make the product easier to evaluate.
-- Constraint or concern: A realistic workflow had to be available immediately for testers and reviewers.
-- Resulting change: Import/export capabilities and a richer sample workflow were added to the web app.
-- Evaluation: The presence of sample workflow loading and export support is reflected in the app’s behavior and implementation.
+- **Problem.** The client read the stream with a one-shot `fetch`. On any error it marked the *run* as `failed`, which was wrong, since only the connection had failed. It never retried or replayed. It also created a new `TextDecoder` for every chunk, which can corrupt multi-byte characters split across chunks.
+- **Change.**
+  - Extracted `followRunStream` into `runStream.ts`.
+  - It resumes from the store's cursor and retries with capped exponential backoff.
+  - It fills sequence gaps from `/events?after=` before applying later events, so the store only receives events in order.
+  - It stops on run completion, on abort, or on 404.
+  - One decoder is used per connection.
+- **Evidence.** `runStream.test.ts` has 5 tests with a fake `fetch` and SSE frames split mid-frame. `index.test.ts` has "resumes from a cursor via ?after and Last-Event-ID…".
+- **Not claimed.** There is no browser test. There is no snapshot recovery, no recovery after a page reload, and no reconnect indicator.
 
-### 5) Validation feedback for invalid graph edits
+### Correction 6: tests that could not detect these bugs
 
-- Objective: Make cycle detection and invalid connection blocking visible to the user.
-- Constraint or concern: The workflow logic already blocked invalid connections, but the user had no clear feedback when that happened.
-- Resulting change: The UI surfaced validation feedback rather than silently rejecting the action.
-- Evaluation: The current graph logic explicitly rejects invalid connections and cycles, and the user-facing interaction was updated to explain the failure mode.
+- **Problem.** The SSE, failure, and cancellation tests used instant or fixed-sleep executors, so they could not tell correct behavior from broken behavior.
+- **Change.** Added `createControlledExecutor` and replaced the timing-dependent scheduler tests. Added lifecycle tests against a real HTTP server.
+- **Evidence.** These new tests immediately caught a regression in the first version of Correction 1. `createRun` gave `run-created` no sequence number, so the first scheduler event also got sequence 1, and replay from cursor 0 skipped `run-created`. The fix assigns sequence 1 in `createRun`.
 
-### 6) Realistic branch semantics in the sample workflow
+### Found during the documentation review, not fixed
 
-- Objective: Replace a simplistic sample with a more operationally realistic workflow.
-- Constraint or concern: The sample needed to reflect business-style branching, condition labels, and per-edge notes.
-- Resulting change: The sample workflow was expanded and edge metadata was added to support labels and comments on transitions.
-- Evaluation: The implementation includes edge label/comment support in the workflow model and editor, matching the request for branch semantics.
+- **No CORS.** The web app (`:5173`) calls the API (`:3001`) directly. The API registers no CORS headers and has no `OPTIONS` routes. Against the running server, the preflight `OPTIONS /runs` returns 404. The browser UI therefore cannot start or cancel runs. This also means that none of the fixes above have been observed in a browser.
+- **Branch labels are cosmetic.** `buildWorkflowPayload` sends only edge `id`, `source`, and `target`. Both the "Yes" and the "No" branches of the sample run.
 
-### 7) Layout and anchor geometry corrections
-
-- Objective: Fix first-screen layout defects and correct connector placement.
-- Constraint or concern: The canvas area should not overlap the footer, and edges should originate from correct node boundaries rather than interior points.
-- Resulting change: Layout sizing and graph handle geometry were adjusted so the canvas remains visually contained and connectors align with the node edge geometry.
-- Evaluation: The final styling and node/edge geometry are consistent with these fixes in the code and UI layout.
-
-### 8) Documentation and evidence tightening
-
-- Objective: Make the project narrative accurate, auditable, and specific to what was actually implemented.
-- Constraint or concern: The project needed documentation that did not overstate the delivered maturity or hide the current limits.
-- Resulting change: README and architecture notes were rewritten to reflect the implemented system, and AI notes were narrowed to evidence-backed scope and decisions.
-- Evaluation: The project documentation now describes the implemented workflow editor, scheduler, SSE behavior, and actual limitations without claiming production readiness.
-
-## 3. Important corrections and iterations
-
-### Case A: Workflow actions were not obvious enough
-
-- What was wrong: The initial visual treatment did not make the primary workflow actions easy to identify. The run status and action controls were visually unclear, and the status marker competed with the action area.
-- Why it mattered: A workflow editor needs the run/cancel controls to be obvious and the status state to be understandable at a glance.
-- How it was corrected: The position and styling of the run controls and status indicator were adjusted to keep the workflow actions visible and the status readable without overloading the toolbar.
-- Evidence: The final UI layout and component structure in the web app reflect a clearer status/action hierarchy, and the workflow controls remain intentionally obvious.
-
-### Case B: Invalid graph connections were silently rejected
-
-- What was wrong: Cycle detection and invalid edge creation were implemented, but the user did not receive explicit feedback when the action was blocked.
-- Why it mattered: Silent failure creates uncertainty and makes the workflow editor feel unreliable.
-- How it was corrected: The app was updated to surface validation feedback when a connection or cycle is rejected.
-- Evidence: The graph state and validation logic enforce invalid-edge and cycle rejection, and the UI now exposes the reason to the user rather than leaving the action unexplained.
-
-### Case C: The sample workflow was too simple
-
-- What was wrong: The initial sample did not look like a realistic operational process and lacked the branch semantics that the user wanted to demonstrate.
-- Why it mattered: A realistic sample is important for testing, onboarding, and review. It needs to communicate how the workflow behaves, not just whether it renders.
-- How it was corrected: The sample workflow was expanded and edge metadata was added for labels and comments.
-- Evidence: The sample JSON and editor support include branch labels and descriptive comments on edges, matching the requested realism.
-
-### Case D: The first-screen layout crossed the footer and the connectors were misaligned
-
-- What was wrong: The empty canvas area overlapped the footer, and the link geometry did not match the node boundary correctly.
-- Why it mattered: A visual defect on the primary screen undermines trust in the product and makes the editor feel unstable.
-- How it was corrected: Layout sizing and edge-connection geometry were adjusted.
-- Evidence: The final styles and React Flow setup are designed to keep the canvas in-bounds and preserve node-edge alignment in the main screen.
+Both are listed as limitations in the README and ARCHITECTURE.md. Neither has been fixed yet; that is the developer's call.
 
 ## 4. AI suggestions versus human decisions
 
-AI assistance contributed most strongly to the implementation layer: scaffolding the project, suggesting the workflow editor structure, proposing the scheduler model, and iterating on the UI and event flow. The repository and code reflect that contribution clearly.
+**Developer decisions:**
 
-The following choices were explicitly human-directed or human-approved based on the available project evidence:
+- Keep FlowTrace a small, inspectable editor rather than an orchestration platform.
+- Keep editor state separate from execution state.
+- Treat validation as a server-side gate.
+- Ask for a review before any code changes, scenario by scenario, separating what tests prove from what the code merely suggests.
+- Approve fixing all six findings.
+- Require the documentation to describe only verified behavior, with its limitations. For example, it must not claim reliable reconnection or guaranteed cancellation without tests that support it.
 
-- The app was kept as a small, inspectable workflow editor rather than a generalized orchestration platform.
-- Editor state and execution state were intentionally separated.
-- The validation model was treated as a real gating rule, not a cosmetic UI layer.
-- The sample workflow and the user-facing branch metadata were made more realistic because the developer wanted a testable example rather than an abstract toy graph.
-- The UI was refined to emphasize clarity and predictable behavior over novelty.
+**AI contributions:**
 
-These are not claims that the AI did not contribute; they are statements about which decisions were constrained by the developer’s judgment and project goals.
+- The initial scaffold, the scheduler, and the UI iterations.
+- During integration: the probe-driven diagnosis, the specific designs (synchronous `onEvent` with server-assigned sequences; skip-on-any-failed-prerequisite; scheduler-owned synchronous cancellation; replay-based client recovery with gap fill), the controlled-executor test strategy, and finding the CORS and branch gaps while reviewing the documentation.
+
+**AI choices worth reviewing:**
+
+- Reporting in-flight cancelled nodes as `node-skipped` instead of adding a `node-cancelled` event. This avoided changing the event format on both sides.
+- Retrying indefinitely instead of giving up after a fixed number of attempts.
+- Marking the run `failed` locally when the server returns 404 for it.
 
 ## 5. Verification
 
-### Automated tests
+Commands run from the repository root after the integration fixes. The documentation changes did not touch any code.
 
-The project was verified with the actual root-level command:
+| Command | Result |
+|---|---|
+| `npm test` | Web: 5 files, 15 tests passed. API: 3 files, 26 tests passed. |
+| `npm run typecheck` | Exit 0 (web and API) |
+| `npm run build` | Exit 0 (Vite production build and API `tsc`) |
 
-- `npm test`
+Before the fixes, the same commands passed with 8 web and 17 API tests. Passing tests were not evidence that the lifecycle worked.
 
-The command completed successfully with the following results:
+**Manual checks:**
 
-- Web tests: 4 test files passed, 8 tests passed
-- API tests: 3 test files passed, 15 tests passed
-- Total: 22 test files and 22 tests passed across the project
-
-### Manual browser checks
-
-No browser automation artifact or recorded manual verification log was saved in the workspace for this session. The available evidence for the project is the automated test suite above.
+- The API was started locally, and `curl` showed `GET /health` responding and the CORS preflight failing (404).
+- The browser UI was **not** exercised. Because of the CORS gap it cannot start a run.
 
 ## 6. Limitations and remaining work
 
-The current implementation is intentionally bounded and several real limitations remain:
-
-- Workflow state is in-memory only; it does not persist across process restarts.
-- There is no durable event log or long-lived audit trail.
-- The scheduler is a single-process DAG runner, not a distributed execution engine.
-- There is no multi-user coordination, locking model, or concurrency control for collaborative editing.
-- Retry, compensation, and long-running operational semantics are not implemented.
-- The editor is intentionally author-first and local, not a production-grade workflow platform.
-
-These are known constraints of the current implementation, not hidden problems. The project’s scope is a compact assessment-grade prototype, and the remaining work is exactly in the areas that would be needed for production scale or durable execution.
+- **CORS:** missing, which blocks the browser execution flow. This is the next fix to make.
+- **Execution model:** branch labels do not affect execution; node execution is simulated; concurrency is fixed at 2.
+- **Cancellation:** cooperative; in-flight nodes are reported as skipped.
+- **Reconnection:**
+  - verified at unit and HTTP level only, not in a browser;
+  - no snapshot recovery;
+  - no reattach after a page reload;
+  - no reconnect indicator;
+  - unbounded retries.
+- **Operations:** state is in memory and lost on restart, and finished runs are never evicted. There is a single process, no auth, and no durable audit log.
