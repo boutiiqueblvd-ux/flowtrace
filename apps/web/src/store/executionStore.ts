@@ -222,6 +222,25 @@ const inferRunStatus = (events: ExecutionEvent[], fallback: ExecutionStatus): Ex
   return fallback;
 };
 
+const dedupeEvents = (events: ExecutionEvent[]) => {
+  const deduplicated = new Map<number, ExecutionEvent>();
+
+  for (const event of events) {
+    const sequence = normalizeSequence(event, 0);
+    if (sequence <= 0) {
+      continue;
+    }
+
+    deduplicated.set(sequence, {
+      ...event,
+      id: typeof event.id === 'number' ? event.id : sequence,
+      sequence,
+    });
+  }
+
+  return Array.from(deduplicated.values()).sort((left, right) => normalizeSequence(left, 0) - normalizeSequence(right, 0));
+};
+
 export const useExecutionStore = create<ExecutionState>((set, get) => ({
   status: 'idle',
   selectedRunId: null,
@@ -234,6 +253,10 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   setSelectedNodeId: (selectedNodeId) => set({ selectedNodeId }),
   appendEvent: (event) => {
     const current = get();
+    if (event.runId && current.selectedRunId && current.selectedRunId !== event.runId) {
+      return;
+    }
+
     const normalized = {
       ...event,
       id: typeof event.id === 'number' ? event.id : undefined,
@@ -245,11 +268,8 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       return;
     }
 
-    const nextEvents = [...current.events, { ...normalized, sequence: nextSequence, id: normalized.id ?? nextSequence }]
-      .sort((left, right) => normalizeSequence(left, 0) - normalizeSequence(right, 0));
-
+    const nextEvents = dedupeEvents([...current.events, { ...normalized, sequence: nextSequence, id: normalized.id ?? nextSequence }]);
     const nextNodeStates = applyEventToNodeState(current.nodeStates, { ...normalized, sequence: nextSequence, id: normalized.id ?? nextSequence });
-
     const nextStatus = inferRunStatus(nextEvents, current.status);
 
     set({
@@ -261,23 +281,29 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     });
   },
   applyRunSnapshot: (snapshot) => {
-    const normalizedEvents = [...snapshot.events]
+    const current = get();
+    const normalizedEvents = dedupeEvents([...snapshot.events]
       .map((event, index) => ({
         ...event,
         sequence: typeof event.sequence === 'number' ? event.sequence : index + 1,
         id: typeof event.id === 'number' ? event.id : index + 1,
         runId: event.runId ?? snapshot.id,
-      }))
-      .sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
+      })));
 
-    const nextSequence = normalizedEvents.length > 0 ? Math.max(...normalizedEvents.map((event) => event.sequence ?? 0)) : 0;
+    const nextSequence = normalizedEvents.length > 0 ? Math.max(...normalizedEvents.map((event) => normalizeSequence(event, 0))) : 0;
+    if (current.selectedRunId && current.selectedRunId !== snapshot.id && current.events.length > 0) {
+      // A different run is being selected; replace state completely so the UI does not mix runs.
+    } else if (current.selectedRunId === snapshot.id && nextSequence <= current.lastSequence) {
+      return;
+    }
+
     const nextNodeStates = buildNodeStatesFromEvents(normalizedEvents);
     const nextStatus = inferRunStatus(normalizedEvents, (snapshot.status as ExecutionStatus) ?? 'idle');
 
     set({
       status: nextStatus,
-      selectedRunId: snapshot.id ?? get().selectedRunId,
-      lastSequence: Math.max(get().lastSequence, nextSequence),
+      selectedRunId: snapshot.id ?? current.selectedRunId,
+      lastSequence: Math.max(current.lastSequence, nextSequence),
       events: normalizedEvents,
       nodeStates: nextNodeStates,
     });

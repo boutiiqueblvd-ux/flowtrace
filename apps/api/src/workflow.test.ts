@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateWorkflow } from './workflow.js';
+import { cancelRun, validateWorkflow } from './workflow.js';
 
 const validGraph = {
   id: 'demo-workflow',
@@ -103,5 +103,27 @@ describe('workflow validation', () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors.some((error) => error.code === 'duplicate-node-id')).toBe(true);
+  });
+
+  it('uses a single canonical terminal event when a run is cancelled', () => {
+    const run = {
+      id: 'run-42',
+      workflowId: 'demo-workflow',
+      workflow: validGraph,
+      status: 'running',
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-01T00:00:00.500Z',
+      metadata: {},
+      events: [
+        { type: 'run-created', timestamp: '2024-01-01T00:00:00.000Z', message: 'Workflow queued.' },
+        { type: 'run-started', timestamp: '2024-01-01T00:00:00.250Z', runId: 'run-42' },
+      ],
+    };
+
+    const result = cancelRun(run as any, { reason: 'Stopped by user' });
+
+    expect(result.run.status).toBe('cancelled');
+    expect(result.run.events.filter((event) => event.type === 'run-terminal')).toHaveLength(1);
+    expect(result.run.events.filter((event) => event.type === 'run-cancelled')).toHaveLength(0);
   });
 });

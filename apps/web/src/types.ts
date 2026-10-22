@@ -107,4 +107,5 @@ export interface RunSnapshotLike {
   workflowId: string;
   status: string;
   events: ExecutionEvent[];
+  metadata?: Record<string, unknown>;
 }

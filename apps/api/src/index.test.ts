@@ -91,32 +91,43 @@ describe('run events replay', () => {
 
   it('replays only events beyond a stale cursor and exposes the stream response', async () => {
     const app = await createApp();
+    await app.listen({ port: 0, host: '127.0.0.1' });
 
-    const createResponse = await app.inject({
+    const createResponse = await fetch('http://127.0.0.1:' + (app.server.address() as any).port + '/runs', {
       method: 'POST',
-      url: '/runs',
-      payload: { workflow: workflowFixture },
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ workflow: workflowFixture }),
     });
 
-    const runId = createResponse.json().run.id;
+    expect(createResponse.status).toBe(201);
+    const createJson = await createResponse.json() as { run: { id: string } };
+    const runId = createJson.run.id;
 
-    const replay = await app.inject({
+    const replay = await fetch('http://127.0.0.1:' + (app.server.address() as any).port + `/runs/${runId}/events?after=999`, {
       method: 'GET',
-      url: `/runs/${runId}/events?after=999`,
     });
 
-    expect(replay.statusCode).toBe(200);
-    expect(replay.json().events).toEqual([]);
-    expect(replay.json().nextCursor).toBe(999);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      events: [],
+      nextCursor: 999,
+    });
 
-    const stream = await app.inject({
+    const streamResponse = await fetch('http://127.0.0.1:' + (app.server.address() as any).port + `/runs/${runId}/stream?after=0`, {
       method: 'GET',
-      url: `/runs/${runId}/stream?after=0`,
+      headers: { accept: 'text/event-stream' },
     });
 
-    expect(stream.statusCode).toBe(200);
-    expect(stream.headers['content-type']).toContain('text/event-stream');
-    expect(stream.body).toContain('event: run\n');
-    expect(stream.body).toContain('data:');
+    expect(streamResponse.status).toBe(200);
+    expect(streamResponse.headers.get('content-type')).toContain('text/event-stream');
+
+    const reader = streamResponse.body?.getReader();
+    expect(reader).toBeDefined();
+    const firstChunk = await reader!.read();
+    expect(firstChunk.done).toBe(false);
+    expect(new TextDecoder().decode(firstChunk.value)).toContain('event: run');
+
+    await reader!.cancel();
+    await app.close();
   });
 });

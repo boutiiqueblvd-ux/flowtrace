@@ -9,22 +9,25 @@ const getEventSequence = (event: ExecutionEvent) => {
 };
 
 const normalizeRunEvents = (run: RunSnapshot): RunSnapshot => {
-  let nextSequence = run.events.reduce((max, event) => {
-    const candidate = typeof event.sequence === 'number' ? event.sequence : typeof event.id === 'number' ? event.id : 0;
-    return Math.max(max, candidate);
-  }, 0);
+  const deduplicated = new Map<number, ExecutionEvent>();
 
-  const events = run.events.slice(-MAX_EVENT_HISTORY).map((event) => {
+  const orderedEvents = [...run.events].sort((left, right) => getEventSequence(left) - getEventSequence(right));
+
+  for (const [index, event] of orderedEvents.entries()) {
     const explicitSequence = typeof event.sequence === 'number' ? event.sequence : typeof event.id === 'number' ? event.id : undefined;
-    const sequence = explicitSequence ?? (nextSequence += 1);
+    const sequence = explicitSequence && explicitSequence > 0 ? explicitSequence : index + 1;
 
-    return {
+    deduplicated.set(sequence, {
       ...event,
       id: sequence,
       sequence,
       runId: event.runId ?? run.id,
-    } satisfies ExecutionEvent;
-  });
+    } satisfies ExecutionEvent);
+  }
+
+  const events = Array.from(deduplicated.values())
+    .sort((left, right) => getEventSequence(left) - getEventSequence(right))
+    .slice(-MAX_EVENT_HISTORY);
 
   return {
     ...run,
@@ -33,7 +36,9 @@ const normalizeRunEvents = (run: RunSnapshot): RunSnapshot => {
 };
 
 const getEventsAfterCursor = (run: RunSnapshot, cursor: number): ExecutionEvent[] => {
-  return run.events.filter((event) => getEventSequence(event) > cursor);
+  return [...run.events]
+    .sort((left, right) => getEventSequence(left) - getEventSequence(right))
+    .filter((event) => getEventSequence(event) > cursor);
 };
 
 const parseCursor = (value: string | string[] | undefined): number => {
@@ -59,7 +64,11 @@ export const createApp = async () => {
 
     const listenersForRun = listeners.get(normalizedRun.id) ?? new Set();
     for (const listener of listenersForRun) {
-      listener(normalizedRun);
+      try {
+        listener(normalizedRun);
+      } catch (error) {
+        console.error('Failed to notify run listener', error);
+      }
     }
   };
 
@@ -156,12 +165,18 @@ export const createApp = async () => {
     };
 
     let currentCursor = cursor;
+    let closed = false;
+
     for (const event of getEventsAfterCursor(run, cursor)) {
       writeEvent(event);
       currentCursor = Math.max(currentCursor, getEventSequence(event));
     }
 
     const unsubscribe = subscribeToRun(run.id, (updatedRun) => {
+      if (closed) {
+        return;
+      }
+
       const nextEvents = getEventsAfterCursor(updatedRun, currentCursor);
       for (const event of nextEvents) {
         writeEvent(event);
@@ -170,18 +185,21 @@ export const createApp = async () => {
     });
 
     const closeStream = () => {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
       unsubscribe();
       reply.raw.end();
     };
 
-    request.raw.on('close', () => {
-      unsubscribe();
+    request.raw.on('close', closeStream);
+    request.raw.on('end', closeStream);
+    reply.raw.on('close', closeStream);
+    reply.raw.on('error', () => {
+      closeStream();
     });
-    request.raw.on('end', () => {
-      unsubscribe();
-    });
-
-    setTimeout(closeStream, 25);
 
     return reply.code(200);
   });

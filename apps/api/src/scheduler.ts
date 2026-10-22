@@ -117,6 +117,10 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
     let latestTimestamp = clockFn();
 
     const appendEvent = (event: ExecutionEvent) => {
+      if (terminalState) {
+        return;
+      }
+
       events.push(event);
       latestTimestamp = event.timestamp;
     };
@@ -125,11 +129,18 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
       if (terminalState) {
         return;
       }
+
+      const terminalEvent: ExecutionEvent = { type: 'run-terminal', timestamp: clockFn(), status: state, runId };
       terminalState = state;
-      appendEvent({ type: 'run-terminal', timestamp: clockFn(), status: state, runId });
+      events.push(terminalEvent);
+      latestTimestamp = terminalEvent.timestamp;
     };
 
     const markSkipped = (nodeId: string, reason: string) => {
+      if (cancelled || terminalState) {
+        return;
+      }
+
       if (statuses.get(nodeId) === 'running' || TERMINAL_NODE_STATES.includes(statuses.get(nodeId) ?? 'queued')) {
         return;
       }
@@ -139,6 +150,10 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
     };
 
     const markNodeFailed = (nodeId: string, reason: string) => {
+      if (cancelled || terminalState) {
+        return;
+      }
+
       if (TERMINAL_NODE_STATES.includes(statuses.get(nodeId) ?? 'queued')) {
         return;
       }
@@ -162,7 +177,7 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
     };
 
     const scheduleReadyNodes = () => {
-      if (cancelled) {
+      if (cancelled || terminalState) {
         return;
       }
 

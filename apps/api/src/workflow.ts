@@ -384,16 +384,24 @@ export function createRun(input: unknown): RunCreationResult {
 export function cancelRun(run: RunSnapshot, input: unknown): CancelRunResult {
   const request = cancelRunRequestSchema.parse(input ?? {});
   const now = new Date().toISOString();
+  const reason = request.reason ?? 'Cancelled by operator.';
+
+  const terminalEvent = {
+    type: 'run-terminal' as const,
+    timestamp: now,
+    status: 'cancelled' as const,
+    runId: run.id,
+  };
 
   const cancelledRun: RunSnapshot = {
     ...run,
     status: 'cancelled',
     updatedAt: now,
     finishedAt: now,
-    cancelReason: request.reason ?? 'Cancelled by operator.',
+    cancelReason: reason,
     events: [
-      ...run.events,
-      { type: 'run-cancelled', timestamp: now, reason: request.reason ?? 'Cancelled by operator.' },
+      ...run.events.filter((event) => event.type !== 'run-terminal' && event.type !== 'run-cancelled'),
+      terminalEvent,
     ],
   };
 
