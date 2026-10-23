@@ -2,7 +2,7 @@
 
 FlowTrace is a small workflow editor and execution inspector. A React + Vite frontend lets you build a DAG of input, transform, and output nodes. A Fastify backend validates the graph, runs it on a real dependency-aware scheduler, and streams every execution event to the browser over Server-Sent Events (SSE). Node execution is **simulated**: each node waits a random duration and may fail at random. Nodes do not process data.
 
-This is an assessment-grade prototype, not a production orchestration platform. The [Known limitations](#11-current-limitations) section lists what does not work, including one gap that blocks the browser UI from starting runs today.
+This is an assessment-grade prototype, not a production orchestration platform. The [Known limitations](#11-current-limitations) section lists what does not work.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full execution lifecycle and [AI_NOTES.md](AI_NOTES.md) for how AI assistance was used and what it corrected.
 
@@ -15,7 +15,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full execution lifecycle and [AI_
 | Live event recording and SSE delivery | Works | `index.test.ts` (real HTTP server) |
 | Cancellation through the API | Works, with caveats ([§9](#9-cancellation-semantics)) | `scheduler.test.ts`, `index.test.ts` |
 | Stream resume and reconnect (client) | Works in unit tests, not verified in a browser ([§8](#8-snapshot-replay-and-reconnection)) | `runStream.test.ts`, `executionStore.test.ts` |
-| **Browser UI starting a run** | **Blocked: the API has no CORS support** ([§11](#11-current-limitations)) | Preflight `OPTIONS /runs` returns 404 |
+| Frontend → API routing (Vite `/api` proxy) | Works through the real dev server; no browser session run yet ([Run the app](#run-the-app)) | `vite.proxy.test.ts`; manual `curl` against real Vite + API |
 
 ## Stack
 
@@ -43,13 +43,20 @@ Start the API (port `3001`):
 npm run dev:api
 ```
 
-Start the web app (port `5173`):
+Start the web app (port `5173`, or the next free port if that one is taken):
 
 ```bash
 npm run dev:web
 ```
 
-> **Known issue:** the web app calls `http://localhost:3001` directly from origin `http://localhost:5173`. The API does not register CORS headers and has no `OPTIONS` routes, so the browser blocks `POST /runs`. The UI then shows the browser's fetch error and sets the status to `failed`. Editing, import, export, and the sample workflow all work. Starting a run from the UI does not. You can exercise the backend directly with `curl` or through the test suite.
+Open the URL Vite prints. The browser only talks to the web origin. The frontend calls same-origin paths under `/api`, and the Vite dev server forwards them to the API with the prefix removed (`/api/runs/:id/stream` → `http://127.0.0.1:3001/runs/:id/stream`). Because no request crosses origins, the API needs no CORS handling. `vite preview` uses the same proxy.
+
+The proxy targets `127.0.0.1` rather than `localhost`, because Node can resolve `localhost` to IPv6 `::1` while the API listens on IPv4. To point it at a different API, set `FLOWTRACE_API_TARGET` (for example `FLOWTRACE_API_TARGET=http://127.0.0.1:4000 npm run dev:web`).
+
+**Verification:**
+- `vite.proxy.test.ts` starts a real Vite dev server with this config, in front of a stub API. It checks every route the UI uses, error statuses, and that SSE frames are forwarded live rather than buffered.
+- Manually, `curl` was run through the Vite dev server against the real API: health, validate, a run streamed to completion, replay through `?after=` and `Last-Event-ID`, cancel, and a 404.
+- The UI has **not** yet been exercised in an actual browser session.
 
 ## Useful scripts
 
@@ -86,6 +93,8 @@ The graph can be edited while a run is in progress. The run executes the copy of
 Disconnected graphs are allowed. The editor applies similar connection rules locally, including cycle prevention, for immediate feedback. Imported JSON bypasses those editor checks and is only validated by the server when you run it. The UI never calls `POST /workflows/validate`.
 
 ### 4. Backend API contract
+
+The API serves these routes at its root. The browser reaches them as `/api/<route>` through the Vite proxy (see [Run the app](#run-the-app)).
 
 | Method & path | Behavior |
 |---|---|
@@ -146,7 +155,7 @@ What is verified and what is not:
 
 - **Tested** (`runStream.test.ts`, with a fake `fetch` and SSE chunks split mid-frame): resuming after a dropped stream without duplicates, retrying after a network error, filling a gap from the replay endpoint, stopping on 404, and stopping on abort.
 - **Tested** (`index.test.ts`, against a real HTTP server): replay through `?after=` and through `Last-Event-ID`, with contiguous ids and no duplicates.
-- **Not tested:** the `App.tsx` wiring in a real browser (blocked by the CORS gap) and real network interruptions.
+- **Not tested:** the `App.tsx` wiring in a real browser session and real network interruptions. The routes it uses were exercised through the Vite proxy with `curl`.
 - **No snapshot recovery path.** The client recovers by replaying events, never by fetching `GET /runs/:id`.
 - **A page reload loses the run.** The selected run id is not persisted and the UI has no run picker.
 - **No reconnect indicator.** While reconnecting, the UI only logs a console warning.
@@ -176,9 +185,10 @@ Nodes that have not run yet show as `queued`. The `output` field exists in the c
 
 ### 11. Current limitations
 
-Blocking:
+Deployment:
 
-- **No CORS on the API**, so the browser UI cannot start or cancel runs (see the [Run the app](#run-the-app) note). A Vite dev proxy or a CORS hook would fix this. Neither is implemented.
+- **The frontend expects the API under `/api` on its own origin.** That works with `npm run dev:web` and `vite preview`. If you serve the static `npm run build` output any other way, the host must route `/api/*` to the API with the prefix removed. The API itself still sends no CORS headers, so direct cross-origin calls remain unsupported.
+- **No browser session has been run yet.** The proxy path is verified by automated tests and `curl`, but not yet by clicking through the UI.
 
 Behavioral:
 
@@ -212,8 +222,11 @@ flowchart LR
     SCHED["Workflow scheduler<br/>DAG, concurrency, cancel"]
     EXEC["Simulated node executor"]
 
-    UI -->|POST /runs, /cancel| API
-    RS -->|GET /stream?after=N, /events?after=N| API
+    PROXY["Vite dev/preview proxy<br/>/api/* → API, prefix stripped"]
+
+    UI -->|POST /api/runs, /api/runs/:id/cancel| PROXY
+    RS -->|GET /api/runs/:id/stream?after=N, /events?after=N| PROXY
+    PROXY --> API
     RS -->|ordered events| UI
     API --> SCHED
     SCHED --> EXEC
@@ -230,4 +243,6 @@ Execution state lives in memory in a single process. That keeps the lifecycle ea
 
 Implemented and tested: API validation; DAG scheduling with concurrency limits; transitive failure skipping that does not stop independent branches; live event recording; SSE streaming with cursor replay; cooperative cancellation; client resume, retry, and gap fill (unit level).
 
-Not implemented: CORS or a dev proxy; conditional branches; real node execution; durable storage; snapshot-based recovery or reattaching after a reload; multi-instance support; auth; multiplayer editing; scale testing.
+Implemented and tested at proxy level: same-origin `/api` routing through the Vite dev and preview servers.
+
+Not implemented: CORS headers on the API (not needed behind the proxy); conditional branches; real node execution; durable storage; snapshot-based recovery or reattaching after a reload; multi-instance support; auth; multiplayer editing; scale testing.

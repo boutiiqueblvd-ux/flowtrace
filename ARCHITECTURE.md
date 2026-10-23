@@ -22,6 +22,9 @@ apps/
     scheduler.ts    createWorkflowScheduler: DAG scheduling, failure skipping, cancellation, onEvent
     index.ts        Fastify routes, in-memory run store, recordEvent, SSE fan-out
     testing.ts      createControlledExecutor (test helper)
+  web/
+    vite.config.ts            Dev and preview server; /api proxy to the Fastify API
+    vite.proxy.test.ts        Real Vite dev server + stub API: route mapping, SSE pass-through
   web/src/
     App.tsx                   Studio shell; run, cancel, import/export, sample loading
     runStream.ts              followRunStream: SSE client with resume, retry, gap fill
@@ -88,7 +91,7 @@ sequenceDiagram
 
 **Proven:** `index.test.ts` ("streams each event over SSE before the run finishes") reads `node-started:input-1` from a real HTTP stream while that node is still running. It asserts that the terminal event has not arrived before the remaining nodes finish, and that the ids are contiguous. `executionStore.test.ts` checks that live events produce correct durations.
 
-**Inferred:** that the canvas visibly updates in a browser. This has not been observed, because the CORS gap blocks the browser UI.
+**Inferred:** that the canvas visibly updates in a browser. The SSE path through the Vite proxy is verified: `vite.proxy.test.ts` checks that frames are forwarded live, and a manual `curl` against the real API through the proxy received each event as it happened. But no browser session has been run.
 
 ### 4.3 Concurrent branches
 
@@ -127,7 +130,7 @@ sequenceDiagram
 **Limits:**
 - Cancellation is cooperative. An executor that ignores `AbortSignal` keeps running until it returns. Its result is discarded, but the work is not interrupted.
 - In-flight nodes are reported with `node-skipped`, so the inspector shows "skipped" rather than "cancelled".
-- In the browser this path is blocked by the CORS gap.
+- Cancel through the Vite proxy was exercised with `curl` against the real API, but not by clicking Cancel in a browser.
 
 ### 4.6 Reconnection
 
@@ -165,7 +168,7 @@ On the client, `followRunStream`:
 
 ## 6. Known gaps
 
-- **CORS:** the API sends no CORS headers and has no `OPTIONS` handling, so the web app on `:5173` cannot call the API on `:3001`. This was verified against the running server: the preflight `OPTIONS /runs` returns 404. A Vite dev proxy or a Fastify CORS hook would fix it.
+- **Same-origin API access:** the frontend calls `/api/*` on its own origin, and the Vite dev and preview proxy (`vite.config.ts`) forwards those requests to `http://127.0.0.1:3001` with the prefix removed. The API sends no CORS headers, so this works only behind a proxy. Any other way of hosting the static build must route `/api/*` the same way. This replaced the original design, in which the browser called `:3001` directly and every request failed CORS.
 - **Branches:** edge labels and branches (`yes` / `no`) are editor-only. They are not sent to the API, and every outgoing edge executes.
 - **Executor:** node execution is simulated, and node config and outputs are not modelled.
 - **Concurrency:** fixed at 2 on the server.

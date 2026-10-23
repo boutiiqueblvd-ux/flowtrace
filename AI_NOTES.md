@@ -97,12 +97,24 @@ The common root cause: **most tests used executors that finish instantly**. With
 - **Change.** Added `createControlledExecutor` and replaced the timing-dependent scheduler tests. Added lifecycle tests against a real HTTP server.
 - **Evidence.** These new tests immediately caught a regression in the first version of Correction 1. `createRun` gave `run-created` no sequence number, so the first scheduler event also got sequence 1, and replay from cursor 0 skipped `run-created`. The fix assigns sequence 1 in `createRun`.
 
-### Found during the documentation review, not fixed
+### Found during the documentation review
 
-- **No CORS.** The web app (`:5173`) calls the API (`:3001`) directly. The API registers no CORS headers and has no `OPTIONS` routes. Against the running server, the preflight `OPTIONS /runs` returns 404. The browser UI therefore cannot start or cancel runs. This also means that none of the fixes above have been observed in a browser.
-- **Branch labels are cosmetic.** `buildWorkflowPayload` sends only edge `id`, `source`, and `target`. Both the "Yes" and the "No" branches of the sample run.
+- **Branch labels are cosmetic (not fixed).** `buildWorkflowPayload` sends only edge `id`, `source`, and `target`. Both the "Yes" and the "No" branches of the sample run. This is documented as a limitation.
 
-Both are listed as limitations in the README and ARCHITECTURE.md. Neither has been fixed yet; that is the developer's call.
+### Correction 7: the browser could not reach the API (CORS)
+
+- **Problem.** This was found while reviewing the documentation. The web app on `:5173` called `http://localhost:3001` directly. The API registers no CORS headers and has no `OPTIONS` routes, and the preflight `OPTIONS /runs` returned 404 against the running server. As a result, the browser UI could not start or cancel a run.
+- **Change.** The developer chose the smallest fix: a Vite proxy rather than CORS support in the API.
+  - `vite.config.ts` proxies `/api/*` to `http://127.0.0.1:3001` with the prefix removed. It uses the same proxy for `vite preview`.
+  - `API_BASE_URL` in `App.tsx` became `/api`.
+  - No API routes changed and no dependencies were added.
+- **Why `127.0.0.1`.** This was an AI choice. Node can resolve `localhost` to `::1`, while the API listens only on IPv4.
+- **Test override.** `FLOWTRACE_API_TARGET` overrides the target, which lets a test point the proxy at a stub.
+- **Evidence.**
+  - `vite.proxy.test.ts` (9 tests) starts a real Vite dev server from `vite.config.ts` in front of a stub API. It checks POST body forwarding, the mapping of run, cancel, validate, snapshot, replay, and health, 404 pass-through, that SSE frames arrive before the upstream response ends (no buffering), and that non-API paths stay with Vite.
+  - Manually, the real API and the real Vite dev server were started, and `curl` was run through Vite: health, validate, an invalid run returning 400, a run streamed to completion with each event arriving as its node finished, replay through `?after=` and `Last-Event-ID`, cancel mid-run, and a 404.
+- **Not claimed.** No browser session was run.
+- **Remaining.** Static hosting other than `vite preview` must route `/api/*` itself.
 
 ## 4. AI suggestions versus human decisions
 
@@ -119,6 +131,7 @@ Both are listed as limitations in the README and ARCHITECTURE.md. Neither has be
 
 - The initial scaffold, the scheduler, and the UI iterations.
 - During integration: the probe-driven diagnosis, the specific designs (synchronous `onEvent` with server-assigned sequences; skip-on-any-failed-prerequisite; scheduler-owned synchronous cancellation; replay-based client recovery with gap fill), the controlled-executor test strategy, and finding the CORS and branch gaps while reviewing the documentation.
+- For the CORS fix, where the developer specified a Vite proxy and the smallest change: the `/api` prefix with rewrite, the IPv4 target, the environment override, and the real-dev-server proxy test.
 
 **AI choices worth reviewing:**
 
@@ -128,11 +141,11 @@ Both are listed as limitations in the README and ARCHITECTURE.md. Neither has be
 
 ## 5. Verification
 
-Commands run from the repository root after the integration fixes. The documentation changes did not touch any code.
+Commands run from the repository root after the integration fixes and the CORS proxy fix.
 
 | Command | Result |
 |---|---|
-| `npm test` | Web: 5 files, 15 tests passed. API: 3 files, 26 tests passed. |
+| `npm test` | Web: 6 files, 24 tests passed (including 9 in `vite.proxy.test.ts`). API: 3 files, 26 tests passed. |
 | `npm run typecheck` | Exit 0 (web and API) |
 | `npm run build` | Exit 0 (Vite production build and API `tsc`) |
 
@@ -140,12 +153,14 @@ Before the fixes, the same commands passed with 8 web and 17 API tests. Passing 
 
 **Manual checks:**
 
-- The API was started locally, and `curl` showed `GET /health` responding and the CORS preflight failing (404).
-- The browser UI was **not** exercised. Because of the CORS gap it cannot start a run.
+- Before the CORS fix, the API was started locally and `curl` showed the preflight `OPTIONS /runs` failing with 404.
+- After the fix, the real API and the real Vite dev server were started, and `curl` was run through the `/api` proxy. The results are listed under Correction 7.
+- The browser UI has **not** been exercised in a browser session.
 
 ## 6. Limitations and remaining work
 
-- **CORS:** missing, which blocks the browser execution flow. This is the next fix to make.
+- **Browser:** no browser session has been run yet. The frontend → API path is verified by the proxy tests and by `curl` through the Vite dev server.
+- **Hosting:** the API is reachable from the browser only through the `/api` proxy (Vite dev or preview). Any other static host must provide the same routing.
 - **Execution model:** branch labels do not affect execution; node execution is simulated; concurrency is fixed at 2.
 - **Cancellation:** cooperative; in-flight nodes are reported as skipped.
 - **Reconnection:**

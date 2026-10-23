@@ -14,7 +14,8 @@ const nodeTypes = {
   workflowNode: WorkflowNode,
 } as const;
 
-const API_BASE_URL = 'http://localhost:3001';
+// Same-origin prefix; the Vite dev/preview proxy forwards /api/* to the Fastify API (see vite.config.ts).
+const API_BASE_URL = '/api';
 
 const buildWorkflowPayload = (sourceNodes: GraphNode[], sourceEdges: ReturnType<typeof useGraphStore.getState>['edges']) => ({
   id: `workflow-${Date.now()}`,
