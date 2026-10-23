@@ -85,11 +85,11 @@ flowchart LR
     UI --> GS
     UI --> ES
     RS --> ES
-    UI -->|POST /runs, /cancel| PROXY
-    RS -->|GET /stream, /events| PROXY
+    UI -->|"POST /runs, /cancel"| PROXY
+    RS -->|"GET /stream, /events"| PROXY
     PROXY --> ROUTES
     ROUTES --> SCHED
-    SCHED -->|onEvent (sync)| ROUTES
+    SCHED -->|"onEvent (sync)"| ROUTES
 ```
 
 - **Editing state** (`useGraphStore`) and **execution state** (`useExecutionStore`) are separate stores. A run executes the copy of the graph that was sent when it started.
