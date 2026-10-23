@@ -133,6 +133,14 @@ export const executionEventSchema = z.discriminatedUnion('type', [
     reason: z.string().max(500).optional(),
   }),
   executionEventMetadataSchema.extend({
+    type: z.literal('node-cancelled'),
+    timestamp: z.string().datetime(),
+    nodeId: z.string().min(1),
+    // true: the node was running and its execution was aborted; false: it never started.
+    interrupted: z.boolean(),
+    reason: z.string().max(250).optional(),
+  }),
+  executionEventMetadataSchema.extend({
     type: z.literal('run-terminal'),
     timestamp: z.string().datetime(),
     status: z.enum(['succeeded', 'failed', 'cancelled']),
@@ -357,8 +365,25 @@ export function validateWorkflow(input: unknown): WorkflowValidationResult {
   };
 }
 
+// Turns "workflow.nodes.2.config.label" into 'node "transform-a" config.label' so errors are readable in the UI.
+const describeIssuePath = (path: (string | number)[], input: unknown) => {
+  const segments = path[0] === 'workflow' ? path.slice(1) : path;
+  if (segments[0] === 'nodes' && typeof segments[1] === 'number') {
+    const nodes = (input as { workflow?: { nodes?: Array<{ id?: unknown }> } })?.workflow?.nodes;
+    const nodeId = nodes?.[segments[1]]?.id;
+    const rest = segments.slice(2).join('.');
+    return `node "${typeof nodeId === 'string' ? nodeId : segments[1]}"${rest ? ` ${rest}` : ''}`;
+  }
+  return segments.join('.') || 'request';
+};
+
 export function createRun(input: unknown): RunCreationResult {
-  const request = createRunRequestSchema.parse(input);
+  const parsed = createRunRequestSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues.map((issue) => `${describeIssuePath(issue.path, input)}: ${issue.message}`).join('; '));
+  }
+
+  const request = parsed.data;
   const validation = validateWorkflow(request.workflow);
 
   if (!validation.valid) {

@@ -6,6 +6,9 @@ export interface WorkflowNodeData {
   kind: WorkflowNodeType;
   label: string;
   description: string;
+  // Execution overlay for the canvas; derived from the execution store, never edited.
+  executionLabel?: string;
+  executionTone?: string;
 }
 
 export type GraphNode = Node<WorkflowNodeData>;
@@ -77,6 +80,17 @@ export type ExecutionEvent =
   | {
       id?: number;
       sequence?: number;
+      type: 'node-cancelled';
+      timestamp: string;
+      nodeId: string;
+      // true: aborted while running; false: never started because the run was cancelled.
+      interrupted: boolean;
+      reason?: string;
+      runId?: string;
+    }
+  | {
+      id?: number;
+      sequence?: number;
       type: 'run-terminal';
       timestamp: string;
       status: 'succeeded' | 'failed' | 'cancelled';
@@ -103,6 +117,9 @@ export interface NodeExecutionInfo {
   output?: unknown;
   error?: string;
   skipReason?: string;
+  cancelReason?: string;
+  // Set for cancelled nodes: whether execution was interrupted or never started.
+  interrupted?: boolean;
 }
 
 export interface RunSnapshotLike {

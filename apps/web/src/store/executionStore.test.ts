@@ -79,6 +79,29 @@ describe('execution store', () => {
     expect(state.nodeStates).toEqual({ beta: expect.objectContaining({ status: 'running' }) });
   });
 
+  it('records cancellation outcomes identically from live events and from a snapshot', () => {
+    const { clear, appendEvent, applyRunSnapshot } = useExecutionStore.getState();
+    const events = [
+      { id: 1, sequence: 1, type: 'run-created' as const, timestamp: '2024-01-01T00:00:00.000Z', message: 'queued', runId: 'run-c' },
+      { id: 2, sequence: 2, type: 'node-started' as const, timestamp: '2024-01-01T00:00:01.000Z', nodeId: 'alpha', runId: 'run-c' },
+      { id: 3, sequence: 3, type: 'node-cancelled' as const, timestamp: '2024-01-01T00:00:02.000Z', nodeId: 'alpha', interrupted: true, reason: 'stop', runId: 'run-c' },
+      { id: 4, sequence: 4, type: 'node-cancelled' as const, timestamp: '2024-01-01T00:00:02.000Z', nodeId: 'beta', interrupted: false, reason: 'stop', runId: 'run-c' },
+      { id: 5, sequence: 5, type: 'run-terminal' as const, timestamp: '2024-01-01T00:00:02.000Z', status: 'cancelled' as const, runId: 'run-c' },
+    ];
+
+    clear();
+    events.forEach((event) => appendEvent(event));
+    const live = useExecutionStore.getState();
+
+    expect(live.status).toBe('cancelled');
+    expect(live.nodeStates.alpha).toMatchObject({ status: 'cancelled', interrupted: true, cancelReason: 'stop', durationMs: 1000 });
+    expect(live.nodeStates.beta).toMatchObject({ status: 'cancelled', interrupted: false, cancelReason: 'stop' });
+
+    clear();
+    applyRunSnapshot({ id: 'run-c', workflowId: 'wf', status: 'cancelled', events });
+    expect(useExecutionStore.getState().nodeStates).toEqual(live.nodeStates);
+  });
+
   it('computes node duration from live events', () => {
     const { clear, appendEvent } = useExecutionStore.getState();
 

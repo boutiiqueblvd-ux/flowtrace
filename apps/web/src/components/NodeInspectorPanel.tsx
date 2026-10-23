@@ -1,21 +1,22 @@
+import type { NodeStatusView } from '../executionStatus';
 import type { GraphEdge, GraphNode, NodeExecutionInfo } from '../types';
 
 interface NodeInspectorPanelProps {
   selectedNode: GraphNode | null;
   selectedEdge: GraphEdge | null;
   executionInfo: NodeExecutionInfo | null;
+  statusView: NodeStatusView | null;
   onChange: (nodeId: string, updates: Partial<GraphNode['data']>) => void;
   onUpdateEdge: (edgeId: string, updates: Partial<GraphEdge>) => void;
   onDeleteNode: (nodeId: string) => void;
   onDeleteEdge: (edgeId: string) => void;
 }
 
-const formatStatus = (status: string | undefined) => (status ? status.replace(/-/g, ' ') : 'Not run');
-
 export function NodeInspectorPanel({
   selectedNode,
   selectedEdge,
   executionInfo,
+  statusView,
   onChange,
   onUpdateEdge,
   onDeleteNode,
@@ -47,7 +48,7 @@ export function NodeInspectorPanel({
                   label: event.target.value,
                 })
               }
-              placeholder="e.g. Approve"
+              placeholder="e.g. Request"
             />
           </label>
 
@@ -60,9 +61,10 @@ export function NodeInspectorPanel({
                   comment: event.target.value,
                 })
               }
-              placeholder="Add a note for this condition or handoff."
+              placeholder="Add a note about this handoff."
             />
           </label>
+          <p className="field-note">Labels and comments are annotations. Every connection always runs; there is no conditional branching.</p>
         </div>
       </aside>
     );
@@ -73,13 +75,11 @@ export function NodeInspectorPanel({
       <aside className="sidebar-panel">
         <div className="panel-section">
           <h3>Execution details</h3>
-          <p className="empty-state">Select a node to review its status and output.</p>
+          <p className="empty-state">Select a node on the canvas or in the timeline to see its execution status and details.</p>
         </div>
       </aside>
     );
   }
-
-  const statusText = executionInfo ? formatStatus(executionInfo.status) : 'Not run yet';
 
   return (
     <aside className="sidebar-panel">
@@ -103,25 +103,19 @@ export function NodeInspectorPanel({
           </div>
           <div>
             <span className="meta-label">Status</span>
-            <strong>{statusText}</strong>
+            <strong className={`status-text status-text-${statusView?.tone ?? 'idle'}`}>{statusView?.label ?? 'Not run'}</strong>
           </div>
           <div>
             <span className="meta-label">Duration</span>
-            <strong>{executionInfo?.durationMs ? `${executionInfo.durationMs} ms` : 'N/A'}</strong>
+            <strong>{executionInfo?.durationMs !== undefined ? `${executionInfo.durationMs} ms` : '—'}</strong>
           </div>
         </div>
 
-        {executionInfo?.error ? (
-          <div className="execution-detail error-detail">
-            <h4>Error</h4>
-            <p>{executionInfo.error}</p>
-          </div>
-        ) : null}
-
-        {executionInfo?.skipReason ? (
-          <div className="execution-detail warning-detail">
-            <h4>Skipped</h4>
-            <p>{executionInfo.skipReason}</p>
+        {statusView?.detail ? (
+          <div className={`execution-detail ${statusView.tone === 'failed' ? 'error-detail' : statusView.tone === 'skipped' || statusView.tone === 'cancelled' ? 'warning-detail' : 'muted-detail'}`}>
+            <h4>{statusView.tone === 'failed' ? 'Error' : statusView.label}</h4>
+            <p>{statusView.detail}</p>
+            {executionInfo?.cancelReason ? <p>Cancel reason: {executionInfo.cancelReason}</p> : null}
           </div>
         ) : null}
 
@@ -130,18 +124,14 @@ export function NodeInspectorPanel({
             <h4>Output</h4>
             <pre>{typeof executionInfo.output === 'string' ? executionInfo.output : JSON.stringify(executionInfo.output, null, 2)}</pre>
           </div>
-        ) : (
-          <div className="execution-detail muted-detail">
-            <h4>Output</h4>
-            <p>No output recorded yet for this node.</p>
-          </div>
-        )}
+        ) : null}
       </div>
 
       <div className="panel-section">
         <label>
           Label
           <input
+            maxLength={80}
             value={selectedNode.data.label}
             onChange={(event) =>
               onChange(selectedNode.id, {
@@ -154,6 +144,7 @@ export function NodeInspectorPanel({
         <label>
           Description
           <textarea
+            maxLength={250}
             value={selectedNode.data.description}
             onChange={(event) =>
               onChange(selectedNode.id, {
@@ -162,6 +153,10 @@ export function NodeInspectorPanel({
             }
           />
         </label>
+        <p className="field-note">
+          Label and description are sent with each run but not evaluated. Execution is simulated: each node runs for 0.5–3 s and
+          fails at random 10% of the time.
+        </p>
       </div>
     </aside>
   );

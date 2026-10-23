@@ -66,11 +66,11 @@ const buildDefaultExecutionFn = (failureRate: number): NodeExecutor => {
     await delay(duration, signal);
 
     if (signal.aborted) {
-      return { status: 'failed', reason: `Node "${node.id}" was cancelled.` };
+      return { status: 'failed', reason: `"${node.config.label}" was cancelled.` };
     }
 
     if (random() < failureRate) {
-      return { status: 'failed', reason: `Node "${node.id}" failed during execution.` };
+      return { status: 'failed', reason: `Simulated failure in "${node.config.label}" (${Math.round(failureRate * 100)}% failure rate).` };
     }
 
     return { status: 'succeeded' };
@@ -163,8 +163,10 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
             continue;
           }
 
-          const blocker = (incoming.get(nodeId) ?? []).find((dependency) => statuses.get(dependency) !== 'succeeded' && TERMINAL_NODE_STATES.includes(statuses.get(dependency) ?? 'queued'));
-          markSkipped(nodeId, `Dependency "${blocker}" did not succeed.`);
+          const blocker = (incoming.get(nodeId) ?? []).find((dependency) => statuses.get(dependency) !== 'succeeded' && TERMINAL_NODE_STATES.includes(statuses.get(dependency) ?? 'queued')) ?? '';
+          const blockerLabel = nodeMap.get(blocker)?.config.label ?? blocker;
+          const outcome = statuses.get(blocker) === 'failed' ? 'failed' : 'was skipped';
+          markSkipped(nodeId, `Upstream node "${blockerLabel}" ${outcome}.`);
           changed = true;
         }
       }
@@ -237,10 +239,12 @@ export const createWorkflowScheduler = (config: WorkflowSchedulerConfig = {}): W
         return;
       }
 
+      // Every unfinished node gets an explicit outcome: interrupted mid-execution, or never started.
       for (const nodeId of nodeIds) {
-        if (statuses.get(nodeId) === 'running') {
+        const status = statuses.get(nodeId);
+        if (status === 'running' || status === 'queued') {
           statuses.set(nodeId, 'cancelled');
-          appendEvent({ type: 'node-skipped', timestamp: clockFn(), nodeId, reason: cancelReason });
+          appendEvent({ type: 'node-cancelled', timestamp: clockFn(), nodeId, interrupted: status === 'running', reason: cancelReason });
         }
       }
 

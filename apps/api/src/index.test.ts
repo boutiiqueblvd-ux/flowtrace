@@ -321,10 +321,42 @@ describe('live execution lifecycle', () => {
       'node-started:input-1',
       'node-succeeded:input-1',
       'node-started:transform-1',
-      'node-skipped:transform-1',
+      'node-cancelled:transform-1',
+      'node-cancelled:output-1',
       'run-terminal',
     ]);
+    expect(run.events.filter((event: any) => event.type === 'node-cancelled').map((event: any) => event.interrupted)).toEqual([true, false]);
     expect(executor.started).toEqual(['input-1', 'transform-1']);
+  });
+
+  it('keeps the scheduler running after an SSE client disconnects', async () => {
+    const { app, executor, runId, getRun } = await startControlledApp();
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const base = `http://127.0.0.1:${(app.server.address() as any).port}`;
+
+    const controller = new AbortController();
+    const reader = (await fetch(`${base}/runs/${runId}/stream?after=0`, { signal: controller.signal })).body!.getReader();
+    await readStreamUntil(reader, (current) => current.includes('"nodeId":"input-1"'));
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await executor.finish('input-1');
+    await executor.finish('transform-1');
+    await executor.finish('output-1');
+
+    expect((await getRun()).status).toBe('succeeded');
+    await app.close();
+  });
+
+  it('returns a readable 400 for an invalid run request', async () => {
+    const app = await createApp();
+    const workflow = structuredClone(workflowFixture);
+    workflow.nodes[0].config.label = '';
+
+    const response = await app.inject({ method: 'POST', url: '/runs', payload: { workflow } });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain('node "input-1" config.label');
   });
 
   it('treats cancelling a finished run as a no-op', async () => {

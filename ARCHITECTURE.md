@@ -1,182 +1,159 @@
 # FlowTrace Architecture
 
-This document traces the execution lifecycle through the actual code. For each behavior it states which tests prove it and which parts are only inferred from reading the code. For setup and the API reference, see [README.md](README.md).
+This document describes how FlowTrace is built and why. It states which behavior is backed by tests and what remains a limitation. For setup, the API reference and the list of verification evidence, see [README.md](README.md).
 
-## 1. Scope
-
-FlowTrace covers four things:
-
-- authoring a DAG in the browser
-- validating it on the server
-- executing it with a real dependency-aware scheduler
-- inspecting execution live through an ordered event stream
-
-Node execution itself is simulated. Everything runs in one Node.js process with in-memory state.
-
-## 2. Components
+## 1. Component boundaries
 
 ```text
-apps/
-  api/src/
-    workflow.ts     Zod schemas, validateWorkflow, createRun, cancelRun (pure helper)
-    scheduler.ts    createWorkflowScheduler: DAG scheduling, failure skipping, cancellation, onEvent
-    index.ts        Fastify routes, in-memory run store, recordEvent, SSE fan-out
-    testing.ts      createControlledExecutor (test helper)
-  web/
-    vite.config.ts            Dev and preview server; /api proxy to the Fastify API
-    vite.proxy.test.ts        Real Vite dev server + stub API: route mapping, SSE pass-through
-  web/src/
-    App.tsx                   Studio shell; run, cancel, import/export, sample loading
-    runStream.ts              followRunStream: SSE client with resume, retry, gap fill
-    store/graphStore.ts       Editable graph + client-side connection rules
-    store/executionStore.ts   Ordered event log, cursor, derived node states
-    components/               Canvas node, timeline, inspector, toolbar
+apps/api/src/
+  workflow.ts      Zod schemas, validateWorkflow, createRun (readable errors), cancelRun helper
+  scheduler.ts     createWorkflowScheduler: DAG scheduling, failure skipping, cancellation, onEvent
+  index.ts         Fastify routes, in-memory run store, recordEvent (sequencing), SSE fan-out
+  testing.ts       createControlledExecutor: test helper whose nodes finish on command
+apps/web/
+  vite.config.ts   Dev and preview server; /api proxy to the API
+  src/App.tsx                    Shell: run, cancel, import/export, sample, error banners
+  src/runStream.ts               SSE client: resume, retry with backoff, gap fill, connection state
+  src/executionStatus.ts         The single node-state → label mapping used by every view
+  src/store/graphStore.ts        Editable graph and connection rules
+  src/store/executionStore.ts    Ordered event log, resume cursor, derived node states
+  src/components/                WorkflowNode (canvas), ExecutionTimeline, NodeInspectorPanel, Toolbar
 ```
 
-## 3. Core invariants
-
-These invariants carry the design. Each one is enforced in one place.
-
-1. **The event log is the source of truth.** The run status, `startedAt`, and `finishedAt` are derived when an event is appended (`recordEvent` in `index.ts`). On the client, node states are folded from events.
-2. **Sequences are assigned once and never change.** `createRun` gives `run-created` sequence 1. `recordEvent` gives every later event `last + 1`. Nothing renumbers or re-sorts the log, so a cursor held by a client stays valid for the lifetime of the run.
-3. **The scheduler reports events as they happen.** `onEvent` is called synchronously for each event, in order, so the server log never lags behind the scheduler.
-4. **There is exactly one terminal event, and it is last.** The scheduler's `appendEvent` drops anything after `run-terminal`.
-5. **The client applies events in order, each one once.** `followRunStream` delivers only `cursor + 1` (filling gaps from the replay endpoint). The execution store drops anything at or below `lastSequence`.
-
-## 4. Lifecycle
+The flow between them:
 
 ```mermaid
 sequenceDiagram
-    participant UI as App.tsx / executionStore
+    participant UI as App / stores
     participant RS as runStream.ts
     participant API as index.ts
     participant S as scheduler.ts
-    participant X as executor
-
-    UI->>API: POST /runs { workflow }
-    API->>API: createRun (validate, run-created seq 1), setRun
-    API->>S: scheduler.run(workflow)  (not awaited)
-    S-->>API: onEvent run-started, node-started... (sync)
-    API->>API: recordEvent: seq+1, status=running
-    API-->>UI: 201 { run: live snapshot }
-    UI->>UI: applyRunSnapshot (new run resets cursor)
+    UI->>API: POST /api/runs (via Vite proxy)
+    API->>API: createRun: validate, run-created = seq 1
+    API->>S: run(workflow), not awaited
+    S-->>API: onEvent run-started, node-started… (sync)
+    API-->>UI: 201 live snapshot
     UI->>RS: followRunStream(runId)
-    RS->>API: GET /runs/:id/stream?after=lastSequence
-    API-->>RS: replay events > cursor, then subscribe
-    X-->>S: node settles
-    S-->>API: onEvent node-succeeded / node-started ...
-    API-->>RS: SSE frame (id = sequence)
-    RS->>UI: appendEvent (in order, deduped)
-    S-->>API: onEvent run-terminal
-    API-->>RS: final frame, stream closed
-    RS->>RS: isFinished() -> stop
+    RS->>API: GET /stream?after=lastSequence
+    API-->>RS: replay, then live SSE frames (id = sequence)
+    RS->>UI: appendEvent, in order, once
+    S-->>API: run-terminal
+    API-->>RS: final frame; stream closes
 ```
 
-### 4.1 Run
+## 2. Graph editing state
 
-1. `handleRunWorkflow` in `App.tsx` sends `POST /runs` with the payload built by `buildWorkflowPayload`.
-2. `createRun` validates the request with Zod and `validateWorkflow`. An invalid workflow returns 400 and nothing is scheduled.
-3. The route calls `setRun(run)` and then `void startSchedulerForRun(run)`. The scheduler's `run()` executes synchronously up to its first `await`. That means `run-started` and the first `node-started` events are already recorded when the 201 response is serialized. The response returns `runs.get(id)`, the live snapshot.
+`useGraphStore` holds the nodes, edges, selection and validation messages. `onConnect` rejects cycles, edges into input nodes and edges out of output nodes, and says why. The node inspector edits the label (max 80 characters) and description (max 250), which matches the server schema.
 
-**Proven:** `index.test.ts` ("records scheduler events as they happen…"), which asserts status `running` and `[run-created, run-started, node-started:input-1]` before any node finishes.
+Editing is independent of execution. A run uses the payload built when Run was clicked, so editing during a run does not affect it. Import, Load sample and Clear all are disabled while a run is active, so the run being displayed cannot be orphaned. When a run is not active, those actions also clear the execution view.
 
-**Inferred:** the client side of this flow, because `App.tsx` has no test.
+## 3. Execution state
 
-### 4.2 Execution events
+`useExecutionStore` keeps:
 
-1. The scheduler's `appendEvent` pushes to its local array and calls `config.onEvent`.
-2. The server's `recordEvent` assigns the sequence, updates the status, and calls `setRun`.
-3. `setRun` notifies the SSE listeners. Each open stream's `flushRunEvents` writes the frames after its own cursor.
-4. On the client, `followRunStream` parses each frame, `deliver` checks ordering, and `appendEvent` folds the event into `nodeStates`. The canvas and the timeline re-render from the store.
+- the selected run id,
+- the ordered event list,
+- `lastSequence`, the resume cursor,
+- the node states derived from the events.
 
-**Proven:** `index.test.ts` ("streams each event over SSE before the run finishes") reads `node-started:input-1` from a real HTTP stream while that node is still running. It asserts that the terminal event has not arrived before the remaining nodes finish, and that the ids are contiguous. `executionStore.test.ts` checks that live events produce correct durations.
+Both snapshots and live events go through one fold, `applyEventToNodeState`, so the two paths cannot disagree. A test asserts this for cancellation. The store rejects events at or below the cursor and events belonging to a different run. Loading a different run replaces the state, including the cursor.
 
-**Inferred:** that the canvas visibly updates in a browser. The SSE path through the Vite proxy is verified: `vite.proxy.test.ts` checks that frames are forwarded live, and a manual `curl` against the real API through the proxy received each event as it happened. But no browser session has been run.
+`describeNodeStatus` (`executionStatus.ts`) maps a node's state to a tone, a label and a detail. Because the canvas badge, the inspector and the timeline all use it, they cannot drift apart. A node with no events reads "Queued" during a run, "Not run" before any run, and "Not in last run" if it was added after the run started.
 
-### 4.3 Concurrent branches
+## 4. Backend validation
 
-`scheduleReadyNodes` selects `queued` nodes whose prerequisites have **all** `succeeded` and starts them while fewer than `maxConcurrency` nodes are active. The main loop awaits `Promise.race` over the active tasks, propagates skips, and schedules again. JavaScript runs single-threaded, and every status change happens synchronously between awaits, so nothing in this bookkeeping can race.
+`POST /runs` parses the request with Zod, then runs `validateWorkflow`, which checks:
 
-**Proven:** `scheduler.test.ts`:
-- "runs independent ready nodes concurrently" reaches a peak of 2.
-- "makes dependents wait for every prerequisite even when slots are free" uses `maxConcurrency: 4`. With prerequisites `a` and `b`, node `c` does not start after `a` finishes, only after `b`.
+- the 50-node limit,
+- duplicate node ids,
+- duplicate edges,
+- edges that reference missing nodes,
+- edge direction (no edges into inputs, none out of outputs),
+- cycles.
 
-### 4.4 Failure
+Schema errors are rewritten so they name the node by id instead of by array index, for example `node "enrich-request" config.label: String must contain at least 1 character(s)`. The UI never calls `POST /workflows/validate`, because run creation already enforces the same checks.
 
-1. `settleNode` marks the node `failed` and emits `node-failed`.
-2. `propagateBlockers` repeats until nothing changes. It skips any `queued` node with a prerequisite that ended without succeeding, even if its other prerequisites are still running.
-3. The loop does **not** end the run on failure. It continues while any node is in flight, so independent branches finish. The terminal status (`failed`) is decided only after every task has settled.
+## 5. DAG scheduling
 
-**Proven:** `scheduler.test.ts`:
-- "keeps running independent branches after a sibling fails": no terminal event is emitted while `slow` is still running, and `after-slow` later succeeds.
-- "skips transitive dependents as soon as one prerequisite fails, regardless of node order": nodes are declared in reverse topological order. `join` is skipped while its other parent is still running.
+`createWorkflowScheduler` tracks a status for each node: queued, running, succeeded, failed, skipped or cancelled.
 
-### 4.5 Cancellation
+- `scheduleReadyNodes` starts queued nodes whose prerequisites have **all** succeeded, while fewer than `maxConcurrency` nodes are running. The default is 2.
+- The main loop awaits `Promise.race` over the in-flight tasks, propagates skips, and schedules again. JavaScript is single-threaded and every status change happens synchronously between awaits, so this bookkeeping has no races.
+- **Failure:** the node is marked failed with its reason. `propagateBlockers` then repeats until nothing changes, skipping every queued node with a prerequisite that did not succeed. Each skip records the name of the upstream node that caused it. The run does **not** end at the first failure. It ends only after every in-flight node has settled.
+- **Terminal state:** `succeeded` only if every node succeeded; otherwise `failed` or `cancelled`. Exactly one `run-terminal` event is emitted, and it is the last event.
 
-1. `handleCancelWorkflow` sends `POST /runs/:id/cancel`.
-2. The route parses `{ reason? }` and returns `cancelled: false` without changes if the run has already finished. Otherwise it calls `scheduler.cancel(reason)`.
-3. `cancel()` sets `cancelRequested` and calls `cancelActiveRun`, which synchronously:
-   - marks each running node `cancelled` and emits `node-skipped` with the reason,
-   - aborts each node's `AbortController`,
-   - emits `run-terminal: cancelled`.
-4. `scheduleReadyNodes` refuses to start anything once cancel has been requested. Later executor results are ignored, because `settleNode` only acts on nodes that are still `running`.
-5. `run()` still awaits the in-flight tasks before it resolves, so no promise is left orphaned.
-6. If no scheduler is registered and the run is not finished (an edge case), the route records the terminal event itself.
+Tests use `createControlledExecutor`, whose nodes finish only when the test says so. They cover:
 
-**Proven:**
-- `scheduler.test.ts`: "cancels in-flight nodes immediately and never starts new ones" (the events are present synchronously after `cancel()`, and only `a` and `b` ever start); "starts no nodes when cancelled before the run begins"; "interrupts the default executor when cancelled" (resolves in under 500 ms, against a 500–3000 ms node).
-- `index.test.ts`: "cancels the real scheduler and keeps the history of nodes that ran", which checks the exact event list, and "treats cancelling a finished run as a no-op".
+- dependents waiting even when slots are free,
+- concurrency peaks,
+- independent branches finishing after a failure,
+- transitive skips with nodes declared in reverse order,
+- skip reasons,
+- the shipped sample (two concurrent branches; a failure isolated to one branch).
 
-**Limits:**
-- Cancellation is cooperative. An executor that ignores `AbortSignal` keeps running until it returns. Its result is discarded, but the work is not interrupted.
-- In-flight nodes are reported with `node-skipped`, so the inspector shows "skipped" rather than "cancelled".
-- Cancel through the Vite proxy was exercised with `curl` against the real API, but not by clicking Cancel in a browser.
+## 6. Event streaming
 
-### 4.6 Reconnection
+- **Recording.** `recordEvent` gives each event the next sequence number, derives the run status (`running`, then the terminal status), stores the new snapshot, and notifies the listeners for that run. Sequences start at 1, are contiguous, and are never rewritten.
+- **SSE.** `/runs/:id/stream` subscribes first and then replays the events after the cursor, synchronously, so no event can fall between the replay and the live push. Each frame carries `id: <sequence>`. The stream closes after the terminal event. When the request closes, the stream unsubscribes its listener; this was verified by inspection. The scheduler is not tied to any connection, so it keeps running if the browser disconnects (tested).
+- **Proxy.** Vite forwards `/api/*` to the API without buffering. `vite.proxy.test.ts` checks that an SSE frame reaches the client before the upstream response finishes.
 
-On the server, `/stream` subscribes before it replays and does both synchronously, so no event can fall between the replay and the live push. The cursor comes from `?after=`, or from the `Last-Event-ID` header if no `after` is given.
+## 7. Event replay and reconnection
 
-On the client, `followRunStream`:
+`followRunStream` handles the client side:
 
-- reads `getCursor()` (the store's `lastSequence`) on every connect, never a stale React closure;
-- after a disconnect, an error, or an unexpected end of stream, retries with backoff of `min(5000, 250 * 2^failures)` ms, so 0.5 s up to 5 s. It retries indefinitely and resets the counter after any connection that delivered events;
-- when an event arrives with `sequence > cursor + 1`, fetches `/events?after=cursor` and applies the contiguous run first;
-- stops on run completion, on abort, or on 404 (`not-found`; the UI shows a message and marks the run `failed`).
+- It connects with `?after=<cursor>`, reading the cursor from the store, never from a React closure.
+- After an error or an early end of the stream, it retries with backoff of 0.5 s, 1 s, 2 s, 4 s, then 5 s. Each change in connection state is reported to the UI, which shows "Reconnecting…".
+- If an event arrives ahead of the cursor, it fetches the missing range from `/events?after=` and applies it first.
+- It stops when the run finishes, when it is aborted, or when the server returns 404.
 
-**Proven:**
-- `runStream.test.ts`, with a fake `fetch` and SSE frames split across chunks: resuming from the last applied sequence after a dropped stream without duplicates; retrying after a network error; filling a gap; the 404 and abort outcomes.
-- `index.test.ts`: "resumes from a cursor via ?after and Last-Event-ID without gaps or duplicates", against a real HTTP server.
-- `executionStore.test.ts`: dropping stale events; resetting the cursor when a different run loads.
+**Verified:**
+- by unit tests with a fake `fetch`: resume, retry, gap fill, connection state, 404 and abort;
+- against a real HTTP server: `?after` and `Last-Event-ID` replay;
+- in headless Chrome: the API connection was dropped mid-run, and the client showed "Reconnecting…", replayed the six missed events, finished, and had no duplicates.
 
-**Not proven, or missing:**
-- Not tested end to end in a browser, and not tested against real network interruptions.
-- There is no snapshot-based recovery. `GET /runs/:id` is never used by the client.
-- A page reload loses track of the run.
-- There is no "reconnecting" indicator in the UI.
-- The client retries forever while the server is unreachable.
+**Not supported:**
+- Reattaching after a page reload.
+- Snapshot-based recovery. Replay covers the whole run because retention (1,000 events) exceeds the maximum per run (103).
 
-## 5. Design decisions and trade-offs
+## 8. Cancellation
 
-| Decision | Why | Cost |
-|---|---|---|
-| The scheduler emits events through a synchronous callback, and the server owns sequencing | One writer assigns sequences, so cursors are trivially stable | The scheduler is coupled to an in-process consumer; there is no queue between them |
-| A failure skips dependents immediately instead of aborting the run | Independent branches finish; the cause of each skip is visible | A failed run takes as long as its slowest independent branch |
-| Cancellation is synchronous inside the scheduler | The HTTP response already reflects the final cancelled state | It is cooperative; misbehaving executors are not interrupted |
-| The client recovers by replaying events rather than fetching snapshots | One code path for live updates and recovery | No compact recovery for very long runs; needs the full log after the cursor |
-| The SSE client uses `fetch` and `ReadableStream` rather than `EventSource` | Explicit control over the cursor, backoff, and abort | Reconnection is implemented by hand, not inherited from the browser |
-| Everything is in memory in one process | Simple to trace and test | Not durable; no multi-instance support; runs are never evicted |
+`scheduler.cancel(reason)` runs synchronously within the cancel request:
 
-## 6. Known gaps
+1. For each running node, it records `node-cancelled` with `interrupted: true` and aborts the node's `AbortSignal`.
+2. For each queued node, it records `node-cancelled` with `interrupted: false`.
+3. It records `run-terminal: cancelled`.
 
-- **Same-origin API access:** the frontend calls `/api/*` on its own origin, and the Vite dev and preview proxy (`vite.config.ts`) forwards those requests to `http://127.0.0.1:3001` with the prefix removed. The API sends no CORS headers, so this works only behind a proxy. Any other way of hosting the static build must route `/api/*` the same way. This replaced the original design, in which the browser called `:3001` directly and every request failed CORS.
-- **Branches:** edge labels and branches (`yes` / `no`) are editor-only. They are not sent to the API, and every outgoing edge executes.
-- **Executor:** node execution is simulated, and node config and outputs are not modelled.
-- **Concurrency:** fixed at 2 on the server.
-- **Unused event type:** `run-cancelled` is defined in the schema but never emitted. `cancelRun` in `workflow.ts` is an exported, tested helper that the routes no longer use.
-- **Event cap:** the log is capped at 1,000 events per run. That is unreachable at 50 nodes, but a client cursor older than the trimmed range would not be detected.
+After that, no node starts, and `settleNode` ignores results from executors that are still in flight. `run()` still awaits those tasks, so no promise is left orphaned. Cancelling a finished run is a no-op.
 
-## 7. Scaling notes (not implemented)
+The UI shows **Interrupted** and **Not started**, which are distinct from **Skipped**, the label for dependency failures. Tests cover this in the scheduler, over HTTP, in the store, the timeline and the inspector, and it was observed in the browser.
 
-- **Larger graphs:** both the server log and the client store copy the event array on each append. Batch updates and virtualize the timeline before raising the limits.
-- **Durability:** persist the event log; `recordEvent` is the single place where an append would become a database write. On startup, recover or fail runs that were left in progress. Put the run id in the URL so a reload can reattach.
-- **Multiple instances:** sequence assignment and SSE fan-out would need a shared log (for example a database or a stream such as Redis Streams) instead of the in-process `Map` and listener sets.
+**Limit:** cancellation is cooperative. An executor that ignores `AbortSignal` keeps running until it returns, and its result is then discarded.
+
+## 9. In-memory limitations
+
+- All runs live in a `Map` in a single process. They are lost on restart, and they are never evicted.
+- SSE listeners are in-process sets, so a second API instance would see neither the runs nor the streams.
+- There is no auth and no per-user isolation.
+- Concurrency is fixed at 2.
+- Node execution is simulated, and configuration and edge labels are not evaluated. The UI states this.
+
+## 10. Scaling considerations (future design, not implemented)
+
+**500-node workflows**
+- Raise the node limit together with the event retention: a 500-node run produces about 1,000 events, so the retention would have to grow.
+- Stop copying the full event array on every append, both in `recordEvent` and in the client store. Use an append-only structure and batch store updates, one render per animation frame.
+- Virtualize the timeline.
+- Make concurrency configurable, and add per-node timeouts.
+- Rely on React Flow's viewport culling, and memoize node data so a status change re-renders only that node.
+
+**Collaborative editing**
+- Move the graph to a server-authoritative document, using versioned operations or a CRDT such as Yjs, with presence.
+- Keep runs bound to an immutable snapshot of the graph (this already happens) and record the graph version on the run.
+- Execution state stays read-only and is shared by run id, so any collaborator can follow a run.
+
+**Durable execution**
+- Persist the event log. `recordEvent` is the single write point and would become a transactional append; the run status is already derived from the events.
+- On startup, mark in-flight runs as failed or interrupted, or resume them from their last completed nodes if executors are idempotent.
+- Move work onto a durable queue with leases, so multiple workers can execute nodes. The scheduler would then become a coordinator that reacts to node-completion events.
+- Make cancellation a persisted state that workers observe.
+- Fan out SSE from a shared log, such as Postgres LISTEN/NOTIFY or Redis Streams, so any API instance can serve any run.

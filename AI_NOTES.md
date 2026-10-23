@@ -1,172 +1,139 @@
 # FlowTrace AI Notes
 
-## 1. Purpose and scope
+## 1. How AI was used
 
-AI assistance was used to scaffold the project, propose the architecture, write the validation layer and scheduler, iterate on the UI, and later to review and correct the frontend–backend integration. The developer set the scope and the acceptance criteria. The developer also decided what to ask for and when to stop.
+AI assistance (Claude, through Claude Code) was used to:
 
-This document records:
+- scaffold the project,
+- write the scheduler, the validation layer and the UI,
+- review and correct the frontend–backend integration in a later recorded session,
+- harden the submission.
 
-- the iterations that materially shaped the result,
-- the architectural corrections made during the integration review, with evidence for each,
-- which decisions were AI suggestions and which were the developer's.
+The candidate set scope and acceptance criteria and decided what to fix. All commits were made by the candidate; a repository rule forbids the AI from committing or pushing.
 
-Entries in §2 predate the integration review. Their exact wording is not available, so they are **reconstructed summaries** from the repository and git history. The entries in §3 come from the recorded session and are concrete.
+Evidence levels used below:
 
-## 2. Consequential iterations before the integration review (reconstructed)
+- **Recorded:** happened in the recorded integration session and is backed by code, tests or command output in this repository.
+- **Reconstructed, needs confirmation:** earlier work whose prompts are not available verbatim. It is summarized from git history and must be confirmed by the candidate before submission ([§6](#6-items-to-confirm-before-submission)).
 
-1. **Architecture framing.** The developer defined a narrow scope: a React + Vite editor and a Fastify API with validation, DAG execution, and an SSE event stream. The repository still follows these boundaries.
-2. **Verification-first baseline.** Test results were reported only after running the actual suite, not from reading the code.
-3. **UI clarity.** Run and cancel controls, the panel hierarchy, and the status labelling were made more obvious without changing the architecture.
-4. **Import, export, and sample workflow.** A realistic sample workflow and JSON import/export were added so reviewers do not have to build a graph by hand.
-5. **Invalid-connection feedback.** The editor already blocked cycles and invalid edges, but did so silently. Validation messages now explain why.
-6. **Branch semantics in the sample.** Edge labels, comments, and `yes`/`no` branch metadata were added to the sample and the editor. *Correction recorded in §3: these remain visual only, and execution ignores them.*
-7. **Layout and connector geometry.** The canvas no longer overlaps the footer, and edges now attach to node boundaries.
+## 2. Consequential prompts (recorded)
 
-## 3. Integration review: architectural corrections
+Quotes are excerpts of the candidate's actual prompts.
 
-### What triggered it
+1. **Skeptical review before any change.** *"Act as a skeptical Staff Engineer reviewing the implementation… Do not modify any files yet. Trace the complete execution lifecycle… Distinguish behavior proven by tests from behavior inferred from code inspection."*
+   - Six scenarios: run, events, concurrency, failure, cancellation, reconnection.
+   - Outcome: the AI wrote throwaway probe scripts that drove the real modules with slow executors. Every scenario showed defects, even though all 25 existing tests passed.
+2. **"Fix these issues all from 1 to 6."** The candidate approved fixing all six findings:
+   - live events,
+   - failure isolation,
+   - the run-to-run cursor bug,
+   - cancellation history,
+   - client reconnection,
+   - timing-independent tests.
+3. **Truthful documentation.** *"The documentation must describe the actual implementation, including any limitations… don't claim that SSE reconnection is fully reliable unless you've tested event replay and snapshot recovery."* While checking the docs against the running server, the AI found that the browser could not reach the API at all, because of CORS.
+4. **Smallest reliable CORS fix.** *"Preferred approach: Configure a Vite development proxy… Do not add unnecessary dependencies… Do not claim browser verification unless it has actually been performed."*
+5. **Final submission hardening.** This was a P0/P1/P2 audit. It included the instruction *"If it uses Yes/No or other conditional branch labels without actual conditional execution, replace them with a truthful parallel workflow example"*, the specified sample shape and node names, and *"Make the following outcomes distinguishable"* for failure and cancellation.
 
-The developer asked for a skeptical staff-engineer review of the whole run lifecycle, before any code changes. It covered six scenarios: run, execution events, concurrent branches, failure, cancellation, and reconnection. For each scenario the review had to separate behavior proven by tests from behavior only inferred from the code.
+## 3. AI output that was rejected, corrected or reworked (recorded)
 
-The existing suite (8 web tests and 17 API tests) passed, along with the type checks and the build. The AI then wrote throwaway probe scripts outside the repository that drove the real modules with slow executors. All six scenarios showed defects. The developer approved fixing all six. A later documentation review found one more gap, which was not fixed.
+### Case A: The first integration pass passed its tests but was wrong
 
-The common root cause: **most tests used executors that finish instantly**. With instant executors, a scheduler that streams events and one that dumps them at the end look the same, and so do a failure policy that stops the run and one that lets other branches finish.
+- **What happened.** The probe scripts showed six defects that the passing tests could not see:
+  - The scheduler returned all events only when the run ended. In a 3-node run, every event after `run-created` arrived at +330 ms in one batch.
+  - The first failure ended the run while an independent branch was still running.
+  - A second run in the same session dropped its first events, because `lastSequence` carried over from the previous run.
+  - Cancellation discarded the history of nodes that had already run, and could rewrite a finished run as `cancelled`.
+  - The client had no reconnection.
+  - The tests used executors that finished instantly or after fixed sleeps, so they could not tell correct behavior from broken behavior.
+- **Correction.**
+  - The scheduler now emits each event through an `onEvent` callback, and the server's `recordEvent` assigns sequences.
+  - A failure skips only its dependents, and the run waits for the other branches.
+  - The cursor resets when a different run loads.
+  - Cancellation is owned by the scheduler and recorded in the event log.
+  - The client gained a reconnecting stream (`runStream.ts`).
+  - `createControlledExecutor` replaced the timing-dependent tests.
+- **Evidence.** The same probes showed four separate batches at +3, +112, +223 and +334 ms after the fix. The new tests are listed in the README.
+- **Confirm (see §6).** Who authored the original integration pass (AI-generated or hand-written)? The session started from it already committed.
 
-### Correction 1: events were not live
+### Case B: The AI's own fix had a regression, caught by the new tests
 
-- **Problem.** `scheduler.run()` collected events in a local array and returned them only when the run finished. The API merged them into the run in one step at the end. In the probe, a 3-node run with 100 ms per node delivered `run-created` at +3 ms and then every other event together at +330 ms. Halfway through the run, `GET /runs/:id` showed only `run-created` and status `queued`.
-- **Change.**
-  - Added an `onEvent` callback to the scheduler, called synchronously for each event.
-  - The API's new `recordEvent` appends each event, assigns its sequence once, and derives the status (`running` and the terminal status).
-  - Removed `reindexEvents`, which renumbered and re-sorted the whole log on every update and so made cursors unstable.
-- **Evidence.** After the fix, the same probe received four batches at +3, +112, +223, and +334 ms. New test: `index.test.ts`, "streams each event over SSE before the run finishes".
+The first version of `recordEvent` did not give `run-created` a sequence number, so the first scheduler event also got sequence 1, and replay from cursor 0 skipped `run-created`. The new lifecycle tests failed immediately (`expected [undefined, 1, 2, …]`). The fix was to assign sequence 1 in `createRun`.
 
-### Correction 2: the first failure ended the whole run
+### Case C: AI-written documentation overclaimed
 
-- **Problem.** `ensureTerminalState` ended the run as soon as any node failed, and the loop exited. Probe:
-  - In `root → bad` / `root → slow → after-slow`, the run ended `failed` while `slow` was still running. `after-slow` never started.
-  - A `join` node with one failed parent and one parent still running stayed `queued` forever, with no event.
+Earlier docs claimed several things that were not true:
 
-  The existing test "continues independent branches after a sibling failure" passed only because both branches finished in the same microtask flush.
-- **Change.**
-  - The loop now runs until every in-flight node settles.
-  - A node is skipped as soon as **any** prerequisite ends without succeeding.
-  - Skips are propagated repeatedly until nothing changes, so dependents of dependents are skipped whatever order the nodes are declared in.
-- **Evidence.** New `scheduler.test.ts` tests use `createControlledExecutor` (`testing.ts`), in which nodes finish only when the test says so. They cover independent branches after a failure, transitive skips in reverse declaration order, and prerequisites waiting with free slots.
+- that the UI emits a `run-cancelled` event (nothing emits it),
+- that SSE carries run snapshots (it carries individual events),
+- that output payloads appear in the inspector (the API never sends any),
+- that reconnect recovery works (it was unverified).
 
-### Correction 3: a second run in the same session lost its events
+They also repeated the iteration list twice and gave wrong test counts. All of this was rewritten against the code. The same review found the CORS blocker, which the docs had never mentioned.
 
-- **Problem.** `applyRunSnapshot` kept `Math.max(previous cursor, new cursor)` when it switched to a different run. Separately, `loadRunStream` built its `?after=` cursor from a stale React render closure. Probe: after a 9-event run, events 2–5 of the next run were all dropped. Live `node-started` events also never set `startedAt`, so durations were reported as 0 ms.
-- **Change.**
-  - A different run now replaces the store state, including the cursor.
-  - The stream reads its cursor from `useExecutionStore.getState()` each time it connects.
-  - `node-started` now records `startedAt`.
-- **Evidence.** New `executionStore.test.ts` tests: "resets the cursor when a different run is loaded…" and "computes node duration from live events".
+### Case D: An AI design choice was reversed in the final pass
 
-### Correction 4: cancellation erased history and could change a finished run
+The AI had chosen to report nodes interrupted by cancellation as `node-skipped`, and it flagged this as worth reviewing. In the final pass that choice was replaced:
 
-- **Problem.**
-  - When the scheduler finished after a cancel, the API saw the cancel's terminal event and discarded every scheduler event. The history showed only `run-created, run-terminal`, although nodes `a` and `b` had run.
-  - Cancelling a run that had already succeeded returned 200 and changed its status to `cancelled`, while its last event still said `succeeded`.
-  - The default executor ignored `AbortSignal`.
-- **Change.**
-  - The scheduler now owns cancellation. `cancel()` synchronously records the in-flight nodes as cancelled, aborts their signals, and emits `run-terminal: cancelled` through the same event log.
-  - Cancelling a finished run is a no-op that returns `cancelled: false`.
-  - The default delay can now be interrupted by the abort signal.
-  - The scheduler no longer resets its cancel flag inside `run()`, so a cancel that arrives before the run starts is honored.
-- **Evidence.** New tests:
-  - `scheduler.test.ts`: "cancels in-flight nodes immediately and never starts new ones", "starts no nodes when cancelled before the run begins", and "interrupts the default executor when cancelled".
-  - `index.test.ts`: "cancels the real scheduler and keeps the history of nodes that ran" and "treats cancelling a finished run as a no-op".
-- **Remaining limit, documented rather than claimed away.** Cancellation is cooperative. An executor that ignores `AbortSignal` is not interrupted. In-flight nodes are reported as `node-skipped`; there is no `node-cancelled` event.
+- `node-cancelled` with `interrupted: true` or `false` now distinguishes **Interrupted** from **Not started**, and both are distinct from dependency **Skipped**.
+- Before the change, nodes that never started had no event at all and stayed "Queued" forever after a cancelled run.
 
-### Correction 5: the client had no reconnection
+### Case E: An invalid verification method was discarded
 
-- **Problem.** The client read the stream with a one-shot `fetch`. On any error it marked the *run* as `failed`, which was wrong, since only the connection had failed. It never retried or replayed. It also created a new `TextDecoder` for every chunk, which can corrupt multi-byte characters split across chunks.
-- **Change.**
-  - Extracted `followRunStream` into `runStream.ts`.
-  - It resumes from the store's cursor and retries with capped exponential backoff.
-  - It fills sequence gaps from `/events?after=` before applying later events, so the store only receives events in order.
-  - It stops on run completion, on abort, or on 404.
-  - One decoder is used per connection.
-- **Evidence.** `runStream.test.ts` has 5 tests with a fake `fetch` and SSE frames split mid-frame. `index.test.ts` has "resumes from a cursor via ?after and Last-Event-ID…".
-- **Not claimed.** There is no browser test. There is no snapshot recovery, no recovery after a page reload, and no reconnect indicator.
+To test reconnection in a real browser, the AI first killed and restarted the Vite dev server mid-run. The page reset to "Not started" because Vite's HMR client reloads the page when the server comes back, so the test was measuring dev tooling, not the app. It was redone with a TCP relay in front of the API, so that only the upstream connection dropped. The client then showed "Reconnecting…", replayed the six missed events, and finished with no duplicates.
 
-### Correction 6: tests that could not detect these bugs
+## 4. Decisions made by the candidate
 
-- **Problem.** The SSE, failure, and cancellation tests used instant or fixed-sleep executors, so they could not tell correct behavior from broken behavior.
-- **Change.** Added `createControlledExecutor` and replaced the timing-dependent scheduler tests. Added lifecycle tests against a real HTTP server.
-- **Evidence.** These new tests immediately caught a regression in the first version of Correction 1. `createRun` gave `run-created` no sequence number, so the first scheduler event also got sequence 1, and replay from cursor 0 skipped `run-created`. The fix assigns sequence 1 in `createRun`.
+- **Scope:** a small, inspectable editor, not an orchestration platform. Editor state is kept separate from execution state, and validation is a server-side gate.
+- **Review before fixes:** an audit must separate what tests prove from what is inferred before anything is changed.
+- **Approved fixes:** all six integration findings, then the CORS fix.
+- **Proxy over CORS:** a Vite `/api` proxy with no new dependencies, rather than CORS support in the API.
+- **Honest sample:** Yes/No branches replaced with a parallel enrich/validate sample, with node names the candidate specified. No conditional engine.
+- **Distinct outcomes** for failure and cancellation, preferring accurate events and labels over new state machinery.
+- **Documentation:** only claim what was verified, including browser verification.
+- **Git:** no AI commits or pushes; the candidate reviews and commits.
 
-### Found during the documentation review
+## 5. How AI output was verified
 
-- **Branch labels are cosmetic (not fixed).** `buildWorkflowPayload` sends only edge `id`, `source`, and `target`. Both the "Yes" and the "No" branches of the sample run. This is documented as a limitation.
+- **Probe scripts** (outside the repository) drove the real scheduler, API and store with slow executors, before and after each fix.
+- **Repository commands** were run after every change set. Final results:
 
-### Correction 7: the browser could not reach the API (CORS)
+  | Command | Result |
+  |---|---|
+  | `npm run test` | Web: 9 files, 34 tests passed. API: 3 files, 30 tests passed. |
+  | `npm run typecheck` | Exit 0 |
+  | `npm run build` | Exit 0 |
 
-- **Problem.** This was found while reviewing the documentation. The web app on `:5173` called `http://localhost:3001` directly. The API registers no CORS headers and has no `OPTIONS` routes, and the preflight `OPTIONS /runs` returned 404 against the running server. As a result, the browser UI could not start or cancel a run.
-- **Change.** The developer chose the smallest fix: a Vite proxy rather than CORS support in the API.
-  - `vite.config.ts` proxies `/api/*` to `http://127.0.0.1:3001` with the prefix removed. It uses the same proxy for `vite preview`.
-  - `API_BASE_URL` in `App.tsx` became `/api`.
-  - No API routes changed and no dependencies were added.
-- **Why `127.0.0.1`.** This was an AI choice. Node can resolve `localhost` to `::1`, while the API listens only on IPv4.
-- **Test override.** `FLOWTRACE_API_TARGET` overrides the target, which lets a test point the proxy at a stub.
-- **Evidence.**
-  - `vite.proxy.test.ts` (9 tests) starts a real Vite dev server from `vite.config.ts` in front of a stub API. It checks POST body forwarding, the mapping of run, cancel, validate, snapshot, replay, and health, 404 pass-through, that SSE frames arrive before the upstream response ends (no buffering), and that non-API paths stay with Vite.
-  - Manually, the real API and the real Vite dev server were started, and `curl` was run through Vite: health, validate, an invalid run returning 400, a run streamed to completion with each event arriving as its node finished, replay through `?after=` and `Last-Event-ID`, cancel mid-run, and a 404.
-- **Not claimed.** No browser session was run.
-- **Remaining.** Static hosting other than `vite preview` must route `/api/*` itself.
+  Earlier baselines: 8 web and 17 API tests before the integration fixes; 24 web and 26 API tests after the CORS fix.
+- **Manual `curl`** against the real API through the real Vite proxy: health, validate, an invalid run returning 400, live streaming, replay through `?after` and `Last-Event-ID`, cancel, and a 404.
+- **Headless Chrome over the DevTools protocol** against the real stack:
+  - the sample running with both branches concurrent;
+  - a failed run with an isolated skip and the error shown in the inspector;
+  - a cancel with both branches Interrupted and both outputs Not started;
+  - an empty-canvas run message;
+  - a mid-run connection drop and recovery;
+  - zero console errors.
 
-## 4. AI suggestions versus human decisions
+  Screenshots were checked. They revealed three layout bugs, all of which were fixed:
+  - unreadable timeline cards;
+  - an overflowing inspector summary;
+  - an inspector that clipped the Label and Description fields, which could not be scrolled to.
 
-**Developer decisions:**
+  The driver scripts were throwaway and are not part of the repository.
 
-- Keep FlowTrace a small, inspectable editor rather than an orchestration platform.
-- Keep editor state separate from execution state.
-- Treat validation as a server-side gate.
-- Ask for a review before any code changes, scenario by scenario, separating what tests prove from what the code merely suggests.
-- Approve fixing all six findings.
-- Require the documentation to describe only verified behavior, with its limitations. For example, it must not claim reliable reconnection or guaranteed cancellation without tests that support it.
+## 6. Items to confirm before submission
 
-**AI contributions:**
+These come from the earlier version of this file. They could not be verified from the recorded session, so the candidate should confirm or remove them.
 
-- The initial scaffold, the scheduler, and the UI iterations.
-- During integration: the probe-driven diagnosis, the specific designs (synchronous `onEvent` with server-assigned sequences; skip-on-any-failed-prerequisite; scheduler-owned synchronous cancellation; replay-based client recovery with gap fill), the controlled-executor test strategy, and finding the CORS and branch gaps while reviewing the documentation.
-- For the CORS fix, where the developer specified a Vite proxy and the smallest change: the `/api` prefix with rewrite, the IPv4 target, the environment override, and the real-dev-server proxy test.
+- **Reconstructed early iterations** (from git history: scaffold, canvas, validation, scheduler, SSE, inspector, layout fixes). Earlier notes said that the AI proposed the initial architecture and wrote the scheduler, and that the developer:
+  - defined the scope,
+  - asked for invalid-connection feedback,
+  - asked for a more realistic sample (later replaced; see §4),
+  - asked for layout fixes, including canvas and footer overlap and connector anchoring.
+- **Earlier UI correction cases:**
+  - unclear run controls,
+  - silent rejection of invalid connections,
+  - a sample that was too simple,
+  - first-screen layout and connector misalignment.
 
-**AI choices worth reviewing:**
-
-- Reporting in-flight cancelled nodes as `node-skipped` instead of adding a `node-cancelled` event. This avoided changing the event format on both sides.
-- Retrying indefinitely instead of giving up after a fixed number of attempts.
-- Marking the run `failed` locally when the server returns 404 for it.
-
-## 5. Verification
-
-Commands run from the repository root after the integration fixes and the CORS proxy fix.
-
-| Command | Result |
-|---|---|
-| `npm test` | Web: 6 files, 24 tests passed (including 9 in `vite.proxy.test.ts`). API: 3 files, 26 tests passed. |
-| `npm run typecheck` | Exit 0 (web and API) |
-| `npm run build` | Exit 0 (Vite production build and API `tsc`) |
-
-Before the fixes, the same commands passed with 8 web and 17 API tests. Passing tests were not evidence that the lifecycle worked.
-
-**Manual checks:**
-
-- Before the CORS fix, the API was started locally and `curl` showed the preflight `OPTIONS /runs` failing with 404.
-- After the fix, the real API and the real Vite dev server were started, and `curl` was run through the `/api` proxy. The results are listed under Correction 7.
-- The browser UI has **not** been exercised in a browser session.
-
-## 6. Limitations and remaining work
-
-- **Browser:** no browser session has been run yet. The frontend → API path is verified by the proxy tests and by `curl` through the Vite dev server.
-- **Hosting:** the API is reachable from the browser only through the `/api` proxy (Vite dev or preview). Any other static host must provide the same routing.
-- **Execution model:** branch labels do not affect execution; node execution is simulated; concurrency is fixed at 2.
-- **Cancellation:** cooperative; in-flight nodes are reported as skipped.
-- **Reconnection:**
-  - verified at unit and HTTP level only, not in a browser;
-  - no snapshot recovery;
-  - no reattach after a page reload;
-  - no reconnect indicator;
-  - unbounded retries.
-- **Operations:** state is in memory and lost on restart, and finished runs are never evicted. There is a single process, no auth, and no durable audit log.
+  The code is consistent with these, for example the validation messages in `graphStore.ts`, but the original prompts and the AI output they corrected are not available.
+- **Authorship of the first integration pass** (Case A).

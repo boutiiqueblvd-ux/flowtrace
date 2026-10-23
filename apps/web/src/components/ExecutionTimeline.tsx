@@ -2,6 +2,8 @@ import type { ExecutionEvent } from '../types';
 
 interface ExecutionTimelineProps {
   events: ExecutionEvent[];
+  // Node id -> current label, so events read as "Enrich Request failed" rather than raw ids.
+  nodeLabels?: Record<string, string>;
   selectedEventId: number | null;
   onSelectEvent: (eventId: number | null) => void;
   onSelectNode: (nodeId: string | null) => void;
@@ -16,40 +18,29 @@ const formatTimestamp = (value: string) => {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 };
 
-const labelForEvent = (event: ExecutionEvent) => {
-  if (event.type === 'run-terminal') {
-    return `Run ${event.status}`;
+const labelForEvent = (event: ExecutionEvent, nodeName: string) => {
+  switch (event.type) {
+    case 'run-created':
+      return 'Run created';
+    case 'run-started':
+      return 'Run started';
+    case 'run-cancelled':
+      return 'Run cancelled';
+    case 'run-terminal':
+      return `Run ${event.status}`;
+    case 'node-started':
+      return `${nodeName} started`;
+    case 'node-succeeded':
+      return `${nodeName} succeeded`;
+    case 'node-failed':
+      return `${nodeName} failed`;
+    case 'node-skipped':
+      return `${nodeName} skipped`;
+    case 'node-cancelled':
+      return event.interrupted ? `${nodeName} interrupted` : `${nodeName} not started`;
+    default:
+      return 'Event';
   }
-
-  if (event.type === 'run-created') {
-    return 'Run created';
-  }
-
-  if (event.type === 'run-started') {
-    return 'Run started';
-  }
-
-  if (event.type === 'run-cancelled') {
-    return 'Run cancelled';
-  }
-
-  if (event.type === 'node-started') {
-    return `Node ${event.nodeId} started`;
-  }
-
-  if (event.type === 'node-succeeded') {
-    return `Node ${event.nodeId} succeeded`;
-  }
-
-  if (event.type === 'node-failed') {
-    return `Node ${event.nodeId} failed`;
-  }
-
-  if (event.type === 'node-skipped') {
-    return `Node ${event.nodeId} skipped`;
-  }
-
-  return 'Event';
 };
 
 const eventTypeLabel = (event: ExecutionEvent) => {
@@ -57,20 +48,32 @@ const eventTypeLabel = (event: ExecutionEvent) => {
   if (event.type === 'run-cancelled') return 'Cancelled';
   if (event.type === 'node-failed') return 'Failure';
   if (event.type === 'node-skipped') return 'Skipped';
+  if (event.type === 'node-cancelled') return 'Cancelled';
   if (event.type === 'node-started') return 'Start';
   if (event.type === 'node-succeeded') return 'Success';
   return event.type.replace('run-', '').replace('node-', '');
 };
 
-export function ExecutionTimeline({ events, selectedEventId, onSelectEvent, onSelectNode }: ExecutionTimelineProps) {
+const detailForEvent = (event: ExecutionEvent) => {
+  if (event.type === 'node-failed') return event.reason ?? 'No error message provided.';
+  if (event.type === 'node-skipped') return event.reason ?? 'A dependency did not succeed.';
+  if (event.type === 'node-cancelled') {
+    return event.interrupted ? 'Execution was aborted because the run was cancelled.' : 'The run was cancelled before this node started.';
+  }
+  return null;
+};
+
+export function ExecutionTimeline({ events, nodeLabels = {}, selectedEventId, onSelectEvent, onSelectNode }: ExecutionTimelineProps) {
   return (
     <div className="execution-timeline" aria-label="Execution timeline">
       {events.length === 0 ? (
-        <p className="empty-state">No execution events yet.</p>
+        <p className="empty-state">No execution events yet. Click Run workflow to execute the graph on the server.</p>
       ) : (
         events.map((event) => {
           const isSelected = selectedEventId === event.id;
-          const eventLabel = labelForEvent(event);
+          const nodeName = event.nodeId ? nodeLabels[event.nodeId] ?? event.nodeId : '';
+          const eventLabel = labelForEvent(event, nodeName);
+          const detail = detailForEvent(event);
           const isNodeEvent = Boolean(event.nodeId);
           const isErrorEvent = event.type === 'node-failed' || (event.type === 'run-terminal' && event.status === 'failed') || event.type === 'run-cancelled';
 
@@ -86,25 +89,20 @@ export function ExecutionTimeline({ events, selectedEventId, onSelectEvent, onSe
 
               <div className="timeline-body">
                 <strong>{eventLabel}</strong>
-                {event.type === 'node-failed' || event.type === 'node-skipped' ? (
-                  <small>{event.reason ?? 'No reason provided.'}</small>
-                ) : null}
-                {event.type === 'run-terminal' ? (
-                  <small>Final status: {event.status}</small>
-                ) : null}
+                {detail ? <small>{detail}</small> : null}
               </div>
 
               {isNodeEvent ? (
                 <button
                   type="button"
                   className="timeline-focus-button"
-                  aria-label={`Focus ${event.nodeId}`}
+                  aria-label={`Focus ${nodeName}`}
                   onClick={() => {
                     onSelectEvent(Number(event.id ?? event.sequence ?? 0));
                     onSelectNode(event.nodeId ?? null);
                   }}
                 >
-                  Focus {event.nodeId}
+                  Focus node
                 </button>
               ) : (
                 <button

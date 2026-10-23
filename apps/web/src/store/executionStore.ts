@@ -128,78 +128,26 @@ const applyEventToNodeState = (
     };
   }
 
+  if (event.type === 'node-cancelled') {
+    return {
+      ...nodeStates,
+      [event.nodeId]: mergeNodeState(current, {
+        nodeId: event.nodeId,
+        status: 'cancelled',
+        interrupted: event.interrupted,
+        cancelReason: event.reason ?? 'The run was cancelled.',
+        durationMs: event.interrupted ? inferDurationMs(current?.startedAt, event.timestamp) : undefined,
+        lastUpdatedAt: event.timestamp,
+        finishedAt: event.timestamp,
+      }, 'queued'),
+    };
+  }
+
   return nodeStates;
 };
 
-const buildNodeStatesFromEvents = (events: ExecutionEvent[]) => {
-  return events.reduce<Record<string, NodeExecutionInfo>>((accumulator, event) => {
-    if (!event.nodeId) {
-      return accumulator;
-    }
-
-    const base = accumulator[event.nodeId];
-
-    if (event.type === 'node-started') {
-      return {
-        ...accumulator,
-        [event.nodeId]: {
-          nodeId: event.nodeId,
-          status: 'running',
-          startedAt: event.timestamp,
-          lastUpdatedAt: event.timestamp,
-        },
-      };
-    }
-
-    if (event.type === 'node-succeeded') {
-      const durationMs = inferDurationMs(base?.startedAt, event.timestamp);
-      return {
-        ...accumulator,
-        [event.nodeId]: {
-          ...base,
-          nodeId: event.nodeId,
-          status: 'succeeded',
-          durationMs,
-          output: event.output ?? base?.output,
-          lastUpdatedAt: event.timestamp,
-          finishedAt: event.timestamp,
-        },
-      };
-    }
-
-    if (event.type === 'node-failed') {
-      return {
-        ...accumulator,
-        [event.nodeId]: {
-          ...base,
-          nodeId: event.nodeId,
-          status: 'failed',
-          error: event.reason ?? 'The node failed without a message.',
-          durationMs: inferDurationMs(base?.startedAt, event.timestamp),
-          lastUpdatedAt: event.timestamp,
-          finishedAt: event.timestamp,
-        },
-      };
-    }
-
-    if (event.type === 'node-skipped') {
-      return {
-        ...accumulator,
-        [event.nodeId]: {
-          ...base,
-          nodeId: event.nodeId,
-          status: 'skipped',
-          skipReason: event.reason ?? 'A dependency failed earlier in the run.',
-          durationMs: inferDurationMs(base?.startedAt, event.timestamp),
-          lastUpdatedAt: event.timestamp,
-          finishedAt: event.timestamp,
-        },
-      };
-    }
-
-    return accumulator;
-  }, {});
-};
+// Snapshots and live events share one fold, so both paths always derive the same node states.
+const buildNodeStatesFromEvents = (events: ExecutionEvent[]) => events.reduce(applyEventToNodeState, {});
 
 const inferRunStatus = (events: ExecutionEvent[], fallback: ExecutionStatus): ExecutionStatus => {
   const terminalEvent = [...events].reverse().find((event) => event.type === 'run-terminal' || event.type === 'run-cancelled');

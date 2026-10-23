@@ -79,6 +79,30 @@ describe('followRunStream', () => {
     expect(sink.applied).toEqual([1, 2, 3, 4]);
   });
 
+  it('reports connection loss and recovery so the UI can show a reconnecting state', async () => {
+    const sink = createSink();
+    const changes: boolean[] = [];
+    const { fetchFn } = createFetch([
+      streamResponse(sse([event(1)])),
+      new TypeError('Failed to fetch'),
+      streamResponse(sse([event(2, true)])),
+    ]);
+
+    const outcome = await followRunStream({
+      apiBaseUrl: 'http://api',
+      runId: 'run-1',
+      signal: new AbortController().signal,
+      fetchFn,
+      wait: async () => undefined,
+      onConnectionChange: (connected) => changes.push(connected),
+      ...sink,
+    });
+
+    expect(outcome).toBe('finished');
+    expect(changes).toEqual([true, false, false, true]);
+    expect(sink.applied).toEqual([1, 2]);
+  });
+
   it('retries after a network error', async () => {
     const sink = createSink();
     const { fetchFn, urls } = createFetch([

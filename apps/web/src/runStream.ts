@@ -10,6 +10,8 @@ export interface RunStreamOptions {
   getCursor: () => number;
   isFinished: () => boolean;
   onEvent: (event: ExecutionEvent) => void;
+  // true when a stream connection opens, false when it drops and a reconnect is scheduled.
+  onConnectionChange?: (connected: boolean) => void;
   fetchFn?: typeof fetch;
   wait?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -122,6 +124,7 @@ export const followRunStream = async (options: RunStreamOptions): Promise<RunStr
     if (!reader) {
       throw new Error('Run stream returned no readable body.');
     }
+    options.onConnectionChange?.(true);
 
     const decoder = new TextDecoder();
     let buffer = '';
@@ -171,6 +174,7 @@ export const followRunStream = async (options: RunStreamOptions): Promise<RunStr
     }
 
     failures += 1;
+    options.onConnectionChange?.(false);
     await wait(Math.min(MAX_BACKOFF_MS, 250 * 2 ** failures), signal);
   }
 

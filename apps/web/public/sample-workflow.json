@@ -1,86 +1,59 @@
 {
-  "id": "sample-account-activation",
-  "name": "Customer onboarding review",
+  "id": "customer-request-parallel",
+  "name": "Customer request: parallel enrich and validate",
   "nodes": [
     {
-      "id": "input-1",
+      "id": "customer-request",
       "type": "input",
-      "position": { "x": 120, "y": 180 },
+      "position": { "x": 80, "y": 220 },
       "config": {
-        "label": "New account request",
-        "description": "Receives the new customer profile and pipeline source.",
-        "defaultValue": "{\"customerId\":\"CUST-1847\",\"plan\":\"enterprise\",\"source\":\"partner\",\"riskProfile\":\"medium\"}"
+        "label": "Customer Request",
+        "description": "Incoming customer request that both branches process independently."
       }
     },
     {
-      "id": "transform-1",
+      "id": "enrich-request",
       "type": "transform",
-      "position": { "x": 420, "y": 120 },
+      "position": { "x": 400, "y": 100 },
       "config": {
-        "label": "Validate customer profile",
-        "description": "Checks required fields, legal entity match, and account completeness.",
-        "expression": "value.customerId && value.plan && value.source"
+        "label": "Enrich Request",
+        "description": "Adds account and plan context. Runs in parallel with validation."
       }
     },
     {
-      "id": "transform-2",
+      "id": "validate-request",
       "type": "transform",
-      "position": { "x": 420, "y": 340 },
+      "position": { "x": 400, "y": 340 },
       "config": {
-        "label": "Assess risk and fit",
-        "description": "Reviews risk score, product fit, and sales coverage before activation.",
-        "expression": "value.riskProfile === 'medium' || value.riskProfile === 'low'"
+        "label": "Validate Request",
+        "description": "Checks required fields. Runs in parallel with enrichment."
       }
     },
     {
-      "id": "transform-3",
-      "type": "transform",
-      "position": { "x": 760, "y": 70 },
-      "config": {
-        "label": "Prepare activation package",
-        "description": "Collects onboarding artifacts and creates the account setup task list.",
-        "expression": "value.customerId && value.plan"
-      }
-    },
-    {
-      "id": "transform-4",
-      "type": "transform",
-      "position": { "x": 760, "y": 350 },
-      "config": {
-        "label": "Route for manual review",
-        "description": "Escalates edge cases to account specialists if the approval threshold is not met.",
-        "expression": "value.riskProfile === 'high' || value.source === 'enterprise'"
-      }
-    },
-    {
-      "id": "output-1",
+      "id": "enriched-result",
       "type": "output",
-      "position": { "x": 1060, "y": 120 },
+      "position": { "x": 720, "y": 100 },
       "config": {
-        "label": "Queue activation",
-        "description": "Creates the onboarding task and sends the launch notification.",
+        "label": "Enriched Result",
+        "description": "Waits only for Enrich Request.",
         "sink": "console"
       }
     },
     {
-      "id": "output-2",
+      "id": "validation-result",
       "type": "output",
-      "position": { "x": 1060, "y": 360 },
+      "position": { "x": 720, "y": 340 },
       "config": {
-        "label": "Notify revenue ops",
-        "description": "Alerts the sales operations queue to gather missing documentation.",
-        "sink": "slack"
+        "label": "Validation Result",
+        "description": "Waits only for Validate Request.",
+        "sink": "console"
       }
     }
   ],
   "edges": [
-    { "id": "edge-1", "source": "input-1", "target": "transform-1", "label": "Continue", "branch": null },
-    { "id": "edge-2", "source": "input-1", "target": "transform-2", "label": "Review", "branch": null },
-    { "id": "edge-3", "source": "transform-1", "target": "transform-3", "label": "Yes", "branch": "yes" },
-    { "id": "edge-4", "source": "transform-1", "target": "transform-4", "label": "No", "branch": "no" },
-    { "id": "edge-5", "source": "transform-2", "target": "transform-3", "label": "Approved", "branch": null },
-    { "id": "edge-6", "source": "transform-2", "target": "output-2", "label": "Needs review", "branch": null },
-    { "id": "edge-7", "source": "transform-3", "target": "output-1", "label": "Continue", "branch": null },
-    { "id": "edge-8", "source": "transform-4", "target": "output-2", "label": "Escalate", "branch": null }
+    { "id": "request-to-enrich", "source": "customer-request", "target": "enrich-request", "label": "Request" },
+    { "id": "request-to-validate", "source": "customer-request", "target": "validate-request", "label": "Request" },
+    { "id": "enrich-to-result", "source": "enrich-request", "target": "enriched-result", "label": "Enriched" },
+    { "id": "validate-to-result", "source": "validate-request", "target": "validation-result", "label": "Validated" }
   ]
 }

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { createWorkflowScheduler } from './scheduler.js';
 import { createControlledExecutor } from './testing.js';
-import type { ExecutionEvent, Workflow } from './workflow.js';
+import { validateWorkflow, type ExecutionEvent, type Workflow } from './workflow.js';
 
 const makeWorkflow = (nodes: Workflow['nodes'], edges: Workflow['edges']): Workflow => ({
   id: 'workflow-1',
@@ -116,6 +117,27 @@ describe('workflow scheduler', () => {
     expect(run.events.some((event) => event.type === 'node-skipped' && event.nodeId === 'join')).toBe(true);
   });
 
+  it('runs the shipped sample workflow as two concurrent, independent branches', async () => {
+    const sample = JSON.parse(readFileSync(new URL('../../web/public/sample-workflow.json', import.meta.url), 'utf8'));
+    expect(validateWorkflow(sample)).toMatchObject({ valid: true });
+
+    const executor = createControlledExecutor();
+    const scheduler = createWorkflowScheduler({ maxConcurrency: 2, executionFn: executor.executionFn });
+    const runPromise = scheduler.run(sample);
+
+    await executor.finish('customer-request');
+    expect(executor.started).toEqual(['customer-request', 'enrich-request', 'validate-request']);
+
+    // A failure in one branch skips only that branch's output.
+    await executor.finish('enrich-request', 'failed');
+    await executor.finish('validate-request');
+    await executor.finish('validation-result');
+    const run = await runPromise;
+
+    expect(summarize(run.events)).toEqual(expect.arrayContaining(['node-skipped:enriched-result', 'node-succeeded:validation-result']));
+    expect(run.status).toBe('failed');
+  });
+
   it('makes dependents wait for every prerequisite even when slots are free', async () => {
     const executor = createControlledExecutor();
     const events: ExecutionEvent[] = [];
@@ -176,6 +198,13 @@ describe('workflow scheduler', () => {
 
     // "join" is skipped immediately even though "slow" is still running.
     expect(summarize(events)).toEqual(expect.arrayContaining(['node-skipped:mid', 'node-skipped:tail', 'node-skipped:join']));
+    // Each skip names the upstream node that caused it.
+    const skipReason = (nodeId: string) => {
+      const skip = events.find((event) => event.type === 'node-skipped' && event.nodeId === nodeId);
+      return skip?.type === 'node-skipped' ? skip.reason : undefined;
+    };
+    expect(skipReason('join')).toBe('Upstream node "bad" failed.');
+    expect(skipReason('tail')).toBe('Upstream node "mid" was skipped.');
     expect(events.some((event) => event.type === 'run-terminal')).toBe(false);
 
     await executor.finish('slow');
@@ -196,9 +225,14 @@ describe('workflow scheduler', () => {
 
     scheduler.cancel('manual stop');
 
-    // Settled synchronously, before the in-flight executor has returned.
-    expect(events.at(-2)).toMatchObject({ type: 'node-skipped', nodeId: 'b', reason: 'manual stop' });
-    expect(events.at(-1)).toMatchObject({ type: 'run-terminal', status: 'cancelled' });
+    // Settled synchronously, before the in-flight executor has returned. The running node is
+    // reported as interrupted and the queued one as never started, not as dependency skips.
+    expect(events.slice(-3)).toMatchObject([
+      { type: 'node-cancelled', nodeId: 'b', interrupted: true, reason: 'manual stop' },
+      { type: 'node-cancelled', nodeId: 'c', interrupted: false, reason: 'manual stop' },
+      { type: 'run-terminal', status: 'cancelled' },
+    ]);
+    expect(events.some((event) => event.type === 'node-skipped')).toBe(false);
 
     const run = await runPromise;
 

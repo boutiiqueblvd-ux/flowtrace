@@ -3,6 +3,7 @@ import ReactFlow, { Background, Controls, MiniMap, type Connection, type Node, t
 import 'reactflow/dist/style.css';
 import { ExecutionTimeline } from './components/ExecutionTimeline';
 import { NodeInspectorPanel } from './components/NodeInspectorPanel';
+import { describeNodeStatus } from './executionStatus';
 import { followRunStream } from './runStream';
 import { Toolbar } from './components/Toolbar';
 import { WorkflowNode } from './components/WorkflowNode';
@@ -94,12 +95,13 @@ export default function App() {
   const applyRunSnapshot = useExecutionStore.getState().applyRunSnapshot;
   const appendEvent = useExecutionStore.getState().appendEvent;
   const setSelectedExecutionNode = useExecutionStore.getState().setSelectedNodeId;
-  const runRef = useRef<number | null>(null);
-  const runCancelledRef = useRef(false);
   const streamControllerRef = useRef<AbortController | null>(null);
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) ?? null;
   const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
   const [selectedEventId, setSelectedEventId] = useState<number | null>(null);
+  // A run or cancel request is in flight; blocks double submission and drives button labels.
+  const [pendingAction, setPendingAction] = useState<'starting' | 'cancelling' | null>(null);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const [leftWidth, setLeftWidth] = useState(260);
   const [timelineWidth, setTimelineWidth] = useState(330);
   const dragRef = useRef<{ type: 'left' | 'timeline'; startX: number; startValue: number } | null>(null);
@@ -114,17 +116,24 @@ export default function App() {
     [leftWidth, timelineWidth],
   );
   const selectedNodeData = useMemo(() => {
-    return nodes.map((node) => ({
-      ...node,
-      data: {
-        ...node.data,
-        executionStatus: execution.nodeStates[node.id]?.status ?? 'queued',
-      },
-    }));
-  }, [execution.nodeStates, nodes]);
+    return nodes.map((node) => {
+      const view = describeNodeStatus(execution.nodeStates[node.id], execution.status);
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          executionLabel: execution.status === 'idle' ? undefined : view.label,
+          executionTone: view.tone,
+        },
+      };
+    });
+  }, [execution.nodeStates, execution.status, nodes]);
+  const nodeLabels = useMemo(() => Object.fromEntries(nodes.map((node) => [node.id, node.data.label])), [nodes]);
+  const selectedNodeStatus = selectedNode ? describeNodeStatus(execution.nodeStates[selectedNode.id], execution.status) : null;
 
+  // Info messages fade; errors stay until dismissed so they can actually be read.
   useEffect(() => {
-    if (!validationMessage) {
+    if (!validationMessage || validationMessage.type === 'error') {
       return;
     }
 
@@ -241,7 +250,15 @@ export default function App() {
     addNode(kind);
   };
 
+  // Drops the displayed run (and stops following it) when the graph is replaced.
+  const resetExecution = () => {
+    streamControllerRef.current?.abort();
+    useExecutionStore.getState().clear();
+    setIsReconnecting(false);
+  };
+
   const handleClearAllNodes = () => {
+    resetExecution();
     clearAllNodes();
   };
 
@@ -296,6 +313,7 @@ export default function App() {
     try {
       const text = await file.text();
       const parsed = JSON.parse(text);
+      resetExecution();
       loadWorkflow(parsed);
     } catch (error) {
       useGraphStore.setState({
@@ -307,15 +325,7 @@ export default function App() {
   };
 
   const handleLoadSampleWorkflow = async () => {
-    streamControllerRef.current?.abort();
-    useExecutionStore.setState({
-      status: 'idle',
-      selectedRunId: null,
-      lastSequence: 0,
-      events: [],
-      nodeStates: {},
-      selectedNodeId: null,
-    });
+    resetExecution();
 
     try {
       const response = await fetch('/sample-workflow.json');
@@ -350,7 +360,12 @@ export default function App() {
       getCursor: () => useExecutionStore.getState().lastSequence,
       isFinished: () => ['succeeded', 'failed', 'cancelled'].includes(useExecutionStore.getState().status),
       onEvent: appendEvent,
+      onConnectionChange: (connected) => setIsReconnecting(!connected),
     });
+
+    if (outcome !== 'aborted') {
+      setIsReconnecting(false);
+    }
 
     if (outcome === 'not-found') {
       useGraphStore.setState({
@@ -361,17 +376,17 @@ export default function App() {
   };
 
   const handleRunWorkflow = async () => {
-    if (execution.status === 'queued' || execution.status === 'running') {
+    if (pendingAction || execution.status === 'queued' || execution.status === 'running') {
       return;
     }
 
     if (nodes.length === 0) {
-      setExecutionStatus('idle');
+      useGraphStore.setState({ validationMessage: { type: 'error', text: 'Add at least one node before running the workflow.' } });
       return;
     }
 
-    runCancelledRef.current = false;
     const workflow = buildWorkflowPayload(nodes, edges);
+    setPendingAction('starting');
 
     try {
       const response = await fetch(`${API_BASE_URL}/runs`, {
@@ -396,26 +411,24 @@ export default function App() {
       setExecutionStatus(run.status === 'queued' ? 'queued' : run.status === 'running' ? 'running' : run.status === 'failed' ? 'failed' : run.status === 'cancelled' ? 'cancelled' : 'succeeded');
       setSelectedNode(nodes[0]?.id ?? null);
       setSelectedExecutionNode(nodes[0]?.id ?? null);
-
-      if (runRef.current) {
-        window.clearTimeout(runRef.current);
-      }
-
       void loadRunStream(run.id);
     } catch (error) {
+      // No run was created, so the previous execution state is left untouched.
       console.error('Run request failed', error);
       useGraphStore.setState({
-        validationMessage: { type: 'error', text: error instanceof Error ? error.message : 'Unable to start workflow execution.' },
+        validationMessage: { type: 'error', text: `Run not started: ${error instanceof Error ? error.message : 'the API could not be reached.'}` },
       });
-      setExecutionStatus('failed');
+    } finally {
+      setPendingAction(null);
     }
   };
 
   const handleCancelWorkflow = async () => {
-    if (!execution.selectedRunId) {
+    if (!execution.selectedRunId || pendingAction) {
       return;
     }
 
+    setPendingAction('cancelling');
     try {
       const response = await fetch(`${API_BASE_URL}/runs/${execution.selectedRunId}/cancel`, {
         method: 'POST',
@@ -437,12 +450,13 @@ export default function App() {
         status: payload.run.status,
         events: payload.run.events,
       });
-      runCancelledRef.current = true;
     } catch (error) {
       console.error('Cancel request failed', error);
       useGraphStore.setState({
-        validationMessage: { type: 'error', text: error instanceof Error ? error.message : 'Unable to cancel workflow execution.' },
+        validationMessage: { type: 'error', text: `Cancel failed: ${error instanceof Error ? error.message : 'the API could not be reached.'}` },
       });
+    } finally {
+      setPendingAction(null);
     }
   };
 
@@ -465,28 +479,28 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <button type="button" className="secondary-button" onClick={() => importInputRef.current?.click()}>
+          <button type="button" className="secondary-button" disabled={isRunActive} title={isRunActive ? 'Cancel the active run first.' : undefined} onClick={() => importInputRef.current?.click()}>
             Import workflow
           </button>
           <button type="button" className="secondary-button" onClick={handleExportWorkflow}>
             Export workflow
           </button>
-          <button type="button" className="secondary-button" onClick={handleLoadSampleWorkflow}>
+          <button type="button" className="secondary-button" disabled={isRunActive} title={isRunActive ? 'Cancel the active run first.' : undefined} onClick={handleLoadSampleWorkflow}>
             Load sample
           </button>
           <button type="button" className="secondary-button" onClick={clearValidationMessage}>
             Clear feedback
           </button>
-          <button type="button" className="secondary-button" onClick={handleClearAllNodes}>
+          <button type="button" className="secondary-button" disabled={isRunActive} title={isRunActive ? 'Cancel the active run first.' : undefined} onClick={handleClearAllNodes}>
             Clear all
           </button>
           {isRunActive ? (
-            <button type="button" className="warning-button" onClick={handleCancelWorkflow}>
-              Cancel run
+            <button type="button" className="warning-button" disabled={pendingAction === 'cancelling'} onClick={handleCancelWorkflow}>
+              {pendingAction === 'cancelling' ? 'Cancelling…' : 'Cancel run'}
             </button>
           ) : (
-            <button type="button" className="primary" onClick={handleRunWorkflow}>
-              Run workflow
+            <button type="button" className="primary" disabled={pendingAction === 'starting'} onClick={handleRunWorkflow}>
+              {pendingAction === 'starting' ? 'Starting…' : 'Run workflow'}
             </button>
           )}
         </div>
@@ -508,6 +522,7 @@ export default function App() {
               selectedNode={selectedNode}
               selectedEdge={selectedEdge}
               executionInfo={selectedNodeId ? execution.nodeStates[selectedNodeId] ?? null : null}
+              statusView={selectedNodeStatus}
               onChange={updateNode}
               onUpdateEdge={updateEdge}
               onDeleteNode={deleteNode}
@@ -571,8 +586,13 @@ export default function App() {
             )}
 
             {validationMessage && (
-              <div className={`validation-banner ${validationMessage.type}`}>
+              <div className={`validation-banner ${validationMessage.type}`} role={validationMessage.type === 'error' ? 'alert' : 'status'}>
                 {validationMessage.text}
+                {validationMessage.type === 'error' ? (
+                  <button type="button" className="banner-dismiss" aria-label="Dismiss message" onClick={clearValidationMessage}>
+                    ×
+                  </button>
+                ) : null}
               </div>
             )}
           </div>
@@ -593,6 +613,7 @@ export default function App() {
             </div>
             <ExecutionTimeline
               events={execution.events}
+              nodeLabels={nodeLabels}
               selectedEventId={selectedEventId}
               onSelectEvent={setSelectedEventId}
               onSelectNode={(nodeId) => {
@@ -604,9 +625,10 @@ export default function App() {
         </aside>
       </main>
 
-      <footer className="statusbar">
+      <footer className="statusbar" aria-live="polite">
         <span>Execution status</span>
-        <strong>{execution.status}</strong>
+        <strong>{executionStatusLabel}</strong>
+        {isReconnecting ? <span className="stream-indicator">Connection to the run lost. Reconnecting…</span> : null}
       </footer>
     </div>
   );

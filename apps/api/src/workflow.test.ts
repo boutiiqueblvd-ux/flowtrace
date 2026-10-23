@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cancelRun, validateWorkflow } from './workflow.js';
+import { cancelRun, createRun, validateWorkflow } from './workflow.js';
 
 const validGraph = {
   id: 'demo-workflow',
@@ -103,6 +103,13 @@ describe('workflow validation', () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors.some((error) => error.code === 'duplicate-node-id')).toBe(true);
+  });
+
+  it('reports run request errors with the offending node id instead of an array index', () => {
+    const workflow = structuredClone(validGraph) as any;
+    workflow.nodes[1].config.label = '';
+
+    expect(() => createRun({ workflow })).toThrow(`node "${workflow.nodes[1].id}" config.label: String must contain at least 1 character(s)`);
   });
 
   it('uses a single canonical terminal event when a run is cancelled', () => {

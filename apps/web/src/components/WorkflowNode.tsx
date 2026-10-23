@@ -9,10 +9,11 @@ const nodeStyles: Record<WorkflowNodeData['kind'], { accent: string; label: stri
 
 export function WorkflowNode({ data, selected }: NodeProps<WorkflowNodeData>) {
   const style = nodeStyles[data.kind];
+  const tone = data.executionTone ?? 'idle';
 
   return (
     <div
-      className={`workflow-node ${selected ? 'selected' : ''}`}
+      className={`workflow-node tone-${tone} ${selected ? 'selected' : ''}`}
       style={{ borderColor: style.accent }}
     >
       {data.kind !== 'input' && (
@@ -22,6 +23,9 @@ export function WorkflowNode({ data, selected }: NodeProps<WorkflowNodeData>) {
         <span className="workflow-node__badge" style={{ background: style.accent }}>
           {style.label}
         </span>
+        {data.executionLabel ? (
+          <span className={`workflow-node__status status-${tone}`}>{data.executionLabel}</span>
+        ) : null}
       </div>
       <div className="workflow-node__body">
         <strong>{data.label}</strong>
